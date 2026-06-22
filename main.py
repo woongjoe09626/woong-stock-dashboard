@@ -137,35 +137,46 @@ def get_market_data():
                 })
 
         # 3. 미국 주식 데이터 긁기 (Yahoo Finance)
-        if us_tickers:
-            for ticker in us_tickers:
-                try:
-                    # 속도를 위해 최소 데이터(2일치)만 조회
-                    hist = yf.Ticker(ticker).history(period="2d")
-                    if len(hist) >= 1:
-                        current_price = float(hist['Close'].iloc[-1])
-                        prev_close = float(hist['Close'].iloc[-2]) if len(hist) >= 2 else current_price
-                        today_change_pct = ((current_price - prev_close) / prev_close) * 100
-                        
-                        port_info = my_port.get(ticker, {"buy_price": 0, "qty": 0})
-                        buy_price = port_info["buy_price"]
-                        qty = port_info["qty"]
-                        
-                        # 원화 환산 금액 계산
-                        buy_amount = buy_price * qty * usd_krw
-                        eval_amount = current_price * qty * usd_krw
-                        
-                        total_buy_amount += buy_amount
-                        total_eval_amount += eval_amount
-                        my_return_pct = ((current_price - buy_price) / buy_price) * 100 if buy_price > 0 else 0.0
-                        
-                        temp_portfolio.append({
-                            "type": "US", "code": ticker, "name": ticker, "buy_price": buy_price,
-                            "current_price": current_price, "qty": qty, "buy_amount": buy_amount,
-                            "eval_amount": eval_amount, "today_change": today_change_pct, "my_return": my_return_pct
-                        })
-                except Exception as e:
-                    print(f"미국 주식 {ticker} 조회 실패:", e)
+if us_tickers:
+    for ticker in us_tickers:
+        try:
+            yf_ticker = yf.Ticker(ticker)
+            hist = yf_ticker.history(period="2d")
+            
+            # ✅ 정식 회사명 가져오기
+            info = yf_ticker.info
+            full_name = info.get('longName') or info.get('shortName') or ticker.upper()
+            
+            if len(hist) >= 1:
+                current_price = float(hist['Close'].iloc[-1])
+                prev_close = float(hist['Close'].iloc[-2]) if len(hist) >= 2 else current_price
+                today_change_pct = ((current_price - prev_close) / prev_close) * 100
+                
+                port_info = my_port.get(ticker, {"buy_price": 0, "qty": 0})
+                buy_price = port_info["buy_price"]
+                qty = port_info["qty"]
+                
+                buy_amount = buy_price * qty * usd_krw
+                eval_amount = current_price * qty * usd_krw
+                
+                total_buy_amount += buy_amount
+                total_eval_amount += eval_amount
+                my_return_pct = ((current_price - buy_price) / buy_price) * 100 if buy_price > 0 else 0.0
+                
+                temp_portfolio.append({
+                    "type": "US",
+                    "code": ticker.upper(),   # ✅ 티커 대문자
+                    "name": full_name,         # ✅ 정식 회사명
+                    "buy_price": buy_price,
+                    "current_price": current_price,
+                    "qty": qty,
+                    "buy_amount": buy_amount,
+                    "eval_amount": eval_amount,
+                    "today_change": today_change_pct,
+                    "my_return": my_return_pct
+                })
+        except Exception as e:
+            print(f"미국 주식 {ticker} 조회 실패:", e)
 
         # 비중 계산 및 최종 포맷팅
         portfolio_list = []
@@ -318,7 +329,7 @@ def get_dashboard_html():
                             tbody.innerHTML += `
                                 <tr>
                                     <td>${badge}<strong>${stock.name}</strong><br><small style="color:#9ca3af; margin-left:35px;">${stock.code}</small></td>
-                                    <td>font-weight:600; text-align:right;">${stock.qty.toLocaleString()}주</td>
+                                    <td style="font-weight:600; text-align:right;">${stock.qty.toLocaleString()}주</td>
                                     <td><span style="color:#aaa">${stock.weight}%</span></td>
                                     <td>${stock.buy_price}</td>
                                     <td><strong>${stock.current_price}</strong></td>
