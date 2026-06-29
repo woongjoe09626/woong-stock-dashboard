@@ -3,7 +3,7 @@ import json
 import os
 import time
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
@@ -28,16 +28,12 @@ HEADERS_NAV = {
     "Referer": "https://finance.naver.com/",
 }
 
-DEFAULT_PORTFOLIO = {
-    "조대표_005387": {"owner": "조대표", "code": "005387", "buy_price": 166145, "qty": 37},
-    "조대표_UNH":    {"owner": "조대표", "code": "UNH",    "buy_price": 150.0,  "qty": 1},
-    "공쥬님_005930": {"owner": "공쥬님", "code": "005930", "buy_price": 70000,  "qty": 100},
-}
+DEFAULT_PORTFOLIO = {}
 
 # ─── 캐시 ───────────────────────────────────────────────
 _cache = {"data": None, "ts": 0}
 _cache_lock = threading.Lock()
-CACHE_TTL = 270  # 4분 30초 (프론트 5분 갱신보다 약간 짧게)
+CACHE_TTL = 270  # 4분 30초
 
 def get_cached():
     with _cache_lock:
@@ -56,8 +52,7 @@ def load_portfolio():
         res = requests.get(f"{GOOGLE_SHEET_URL}?action=get", timeout=10)
         if res.status_code == 200:
             data = res.json()
-            if data:
-                return data
+            if data: return data
     except Exception as e:
         print("구글 시트 불러오기 실패:", e)
     return DEFAULT_PORTFOLIO
@@ -88,7 +83,7 @@ def update_portfolio(item: UpdateItem):
         my_port[item.id] = {"owner": item.owner, "code": item.code,
                             "buy_price": item.buy_price, "qty": item.qty}
         save_portfolio(my_port)
-        set_cache(None)   # 캐시 무효화
+        set_cache(None)
         return {"status": "success"}
     return {"error": "종목을 찾을 수 없습니다."}
 
@@ -115,28 +110,22 @@ def delete_portfolio(item: DeleteItem):
 
 # ─── 실제 시세 가져오기 (병렬) ──────────────────────────
 def fetch_exchange_rate():
-    """환율 조회"""
     try:
         fx = yf.Ticker("USDKRW=X").history(period="1d")
-        if not fx.empty:
-            return float(fx["Close"].iloc[-1])
-    except:
-        pass
+        if not fx.empty: return float(fx["Close"].iloc[-1])
+    except: pass
     return 1380.0
 
 def fetch_kr_stocks(kr_tickers):
-    """네이버로 국내 주식 + 지수 일괄 조회"""
-    price_map   = {}
+    price_map = {}
     kospi_info  = {"price": "0.00", "change": "0.00"}
     kosdaq_info = {"price": "0.00", "change": "0.00"}
     try:
         query = f"SERVICE_INDEX:KOSPI,KOSDAQ|SERVICE_ITEM:{','.join(kr_tickers)}"
-        res   = requests.get(
-            "https://polling.finance.naver.com/api/realtime",
-            headers=HEADERS_NAV, params={"query": query}, timeout=5
-        )
+        res = requests.get("https://polling.finance.naver.com/api/realtime",
+                           headers=HEADERS_NAV, params={"query": query}, timeout=5)
         areas = res.json()["result"]["areas"]
-        idx   = areas[0]["datas"]
+        idx = areas[0]["datas"]
 
         kp_val = int(idx[0]["nv"]) / 100
         kp_chg = int(idx[0]["cv"]) / 100
@@ -160,7 +149,6 @@ def fetch_kr_stocks(kr_tickers):
     return price_map, kospi_info, kosdaq_info
 
 def fetch_one_us_stock(ticker):
-    """미국 주식 1종목 조회 (병렬 워커)"""
     try:
         hist = yf.Ticker(ticker).history(period="2d")
         if len(hist) >= 1:
@@ -177,33 +165,22 @@ def fetch_one_us_stock(ticker):
 
 # ─── 시세 조합 ───────────────────────────────────────────
 def build_market_data():
-    my_port    = load_portfolio()
+    my_port = load_portfolio()
     kr_tickers = list(set(v["code"] for v in my_port.values() if v["code"].isdigit()))
     us_tickers = list(set(v["code"] for v in my_port.values() if not v["code"].isdigit()))
 
-    price_map   = {}
-    kospi_info  = {"price": "0.00", "change": "0.00"}
+    price_map = {}
+    kospi_info = {"price": "0.00", "change": "0.00"}
     kosdaq_info = {"price": "0.00", "change": "0.00"}
-    usd_krw     = 1380.0
+    usd_krw = 1380.0
 
-    # 환율 / 국내주식 / 미국주식을 모두 동시에 병렬 실행
     with ThreadPoolExecutor(max_workers=10) as ex:
         futures = {}
-
-        # 환율
         futures["fx"] = ex.submit(fetch_exchange_rate)
+        if kr_tickers: futures["kr"] = ex.submit(fetch_kr_stocks, kr_tickers)
+        for t in us_tickers: futures[f"us_{t}"] = ex.submit(fetch_one_us_stock, t)
 
-        # 국내 주식 (한 번에 묶어서)
-        if kr_tickers:
-            futures["kr"] = ex.submit(fetch_kr_stocks, kr_tickers)
-
-        # 미국 주식 (종목별로 동시에)
-        for t in us_tickers:
-            futures[f"us_{t}"] = ex.submit(fetch_one_us_stock, t)
-
-        # 결과 수집
         usd_krw = futures["fx"].result()
-
         if "kr" in futures:
             pm, ki, kdi = futures["kr"].result()
             price_map.update(pm)
@@ -212,18 +189,16 @@ def build_market_data():
 
         for t in us_tickers:
             ticker, info = futures[f"us_{t}"].result()
-            if info:
-                price_map[ticker] = info
+            if info: price_map[ticker] = info
 
-    # 포트폴리오 병합
     portfolio_list = []
     for pid, pdata in my_port.items():
-        code   = pdata["code"]
-        owner  = pdata["owner"]
-        is_kr  = code.isdigit()
+        code = pdata["code"]
+        owner = pdata["owner"]
+        is_kr = code.isdigit()
         p_info = price_map.get(code, {"name": code, "price": 0.0, "change": 0.0})
-        cp     = p_info["price"]
-        rate   = 1.0 if is_kr else usd_krw
+        cp = p_info["price"]
+        rate = 1.0 if is_kr else usd_krw
 
         buy_amount  = pdata["buy_price"] * pdata["qty"] * rate
         eval_amount = cp * pdata["qty"] * rate
@@ -255,14 +230,12 @@ def build_market_data():
 # ─── 메인 API ────────────────────────────────────────────
 @app.get("/api/market")
 def get_market_data():
-    # 캐시가 살아있으면 즉시 반환 + 백그라운드에서 갱신 예약
     cached = get_cached()
     if cached:
-        cached["cached"] = True
+        result = dict(cached)
+        result["cached"] = True
         threading.Thread(target=_refresh_cache, daemon=True).start()
-        return cached
-
-    # 캐시 없으면 직접 가져오기
+        return result
     try:
         data = build_market_data()
         set_cache(data)
@@ -271,17 +244,15 @@ def get_market_data():
         return {"error": str(e)}
 
 def _refresh_cache():
-    """백그라운드 캐시 갱신 (캐시가 오래됐을 때만)"""
     with _cache_lock:
         age = time.time() - _cache["ts"]
-        if age < CACHE_TTL * 0.5:   # 절반도 안 됐으면 갱신 생략
-            return
+        if age < CACHE_TTL * 0.5: return
+        _cache["ts"] = time.time()  # Cache Stampede 방지
     try:
         data = build_market_data()
         set_cache(data)
     except:
         pass
-
 
 # ─── HTML ────────────────────────────────────────────────
 HTML = """<!DOCTYPE html>
@@ -322,7 +293,7 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 
 .section-title { font-size: 15px; font-weight: 700; color: #e5e7eb; margin: 28px 0 12px; display: flex; align-items: center; gap: 8px; }
 .table-wrap { width: 100%; overflow-x: auto; background: var(--card); border: 1px solid var(--border); border-radius: 14px; margin-bottom: 8px; }
-table { width: 100%; border-collapse: collapse; text-align: right; min-width: 780px; }
+table { width: 100%; border-collapse: collapse; text-align: right; min-width: 860px; }
 th { background: rgba(255,255,255,0.025); color: var(--muted); font-size: 11px; font-weight: 600;
      text-transform: uppercase; letter-spacing: .4px; padding: 13px 16px; border-bottom: 1px solid var(--border); }
 td { padding: 13px 16px; border-bottom: 1px solid var(--border); font-size: 13px; }
@@ -404,15 +375,15 @@ tfoot th, tfoot td { background: rgba(0,0,0,0.2); color: var(--text); font-weigh
 <div id="panel-jo" class="tab-panel">
     <div class="section-title">🇰🇷 국내 주식</div>
     <div class="table-wrap"><table>
-        <thead><tr><th>종목명</th><th>보유수량</th><th>국내비중</th><th>매입단가</th><th>현재가</th><th>평가금액</th><th>오늘등락</th><th>수익률</th><th>관리</th></tr></thead>
+        <thead><tr><th>종목명</th><th>보유수량</th><th>비중</th><th>매입단가</th><th>현재가</th><th>평가금액</th><th>평가손익</th><th>오늘등락</th><th>수익률</th><th>관리</th></tr></thead>
         <tbody id="jo-kr-body"></tbody>
-        <tfoot><tr><th colspan="5">국내 소계</th><td id="jo-kr-eval">-</td><td>-</td><td id="jo-kr-ret">-</td><td></td></tr></tfoot>
+        <tfoot><tr><th colspan="5">국내 소계</th><td id="jo-kr-eval">-</td><td id="jo-kr-profit">-</td><td>-</td><td id="jo-kr-ret">-</td><td></td></tr></tfoot>
     </table></div>
     <div class="section-title">🇺🇸 해외 주식</div>
     <div class="table-wrap"><table>
-        <thead><tr><th>종목명</th><th>보유수량</th><th>해외비중</th><th>매입단가</th><th>현재가</th><th>평가금액(원화)</th><th>오늘등락</th><th>수익률</th><th>관리</th></tr></thead>
+        <thead><tr><th>종목명</th><th>보유수량</th><th>비중</th><th>매입단가</th><th>현재가</th><th>평가금액(원화)</th><th>평가손익(원화)</th><th>오늘등락</th><th>수익률</th><th>관리</th></tr></thead>
         <tbody id="jo-us-body"></tbody>
-        <tfoot><tr><th colspan="5">해외 소계</th><td id="jo-us-eval">-</td><td>-</td><td id="jo-us-ret">-</td><td></td></tr></tfoot>
+        <tfoot><tr><th colspan="5">해외 소계</th><td id="jo-us-eval">-</td><td id="jo-us-profit">-</td><td>-</td><td id="jo-us-ret">-</td><td></td></tr></tfoot>
     </table></div>
 </div>
 
@@ -420,15 +391,15 @@ tfoot th, tfoot td { background: rgba(0,0,0,0.2); color: var(--text); font-weigh
 <div id="panel-wife" class="tab-panel">
     <div class="section-title">🇰🇷 국내 주식</div>
     <div class="table-wrap"><table>
-        <thead><tr><th>종목명</th><th>보유수량</th><th>국내비중</th><th>매입단가</th><th>현재가</th><th>평가금액</th><th>오늘등락</th><th>수익률</th><th>관리</th></tr></thead>
+        <thead><tr><th>종목명</th><th>보유수량</th><th>비중</th><th>매입단가</th><th>현재가</th><th>평가금액</th><th>평가손익</th><th>오늘등락</th><th>수익률</th><th>관리</th></tr></thead>
         <tbody id="wife-kr-body"></tbody>
-        <tfoot><tr><th colspan="5">국내 소계</th><td id="wife-kr-eval">-</td><td>-</td><td id="wife-kr-ret">-</td><td></td></tr></tfoot>
+        <tfoot><tr><th colspan="5">국내 소계</th><td id="wife-kr-eval">-</td><td id="wife-kr-profit">-</td><td>-</td><td id="wife-kr-ret">-</td><td></td></tr></tfoot>
     </table></div>
     <div class="section-title">🇺🇸 해외 주식</div>
     <div class="table-wrap"><table>
-        <thead><tr><th>종목명</th><th>보유수량</th><th>해외비중</th><th>매입단가</th><th>현재가</th><th>평가금액(원화)</th><th>오늘등락</th><th>수익률</th><th>관리</th></tr></thead>
+        <thead><tr><th>종목명</th><th>보유수량</th><th>비중</th><th>매입단가</th><th>현재가</th><th>평가금액(원화)</th><th>평가손익(원화)</th><th>오늘등락</th><th>수익률</th><th>관리</th></tr></thead>
         <tbody id="wife-us-body"></tbody>
-        <tfoot><tr><th colspan="5">해외 소계</th><td id="wife-us-eval">-</td><td>-</td><td id="wife-us-ret">-</td><td></td></tr></tfoot>
+        <tfoot><tr><th colspan="5">해외 소계</th><td id="wife-us-eval">-</td><td id="wife-us-profit">-</td><td>-</td><td id="wife-us-ret">-</td><td></td></tr></tfoot>
     </table></div>
 </div>
 
@@ -450,7 +421,6 @@ function updateDashboard() {
     fetch('/api/market').then(r => r.json()).then(data => {
         if (data.error) { console.error(data.error); return; }
 
-        // 캐시 배지 표시
         const badge = document.getElementById('cache-badge');
         badge.style.display = data.cached ? 'inline-block' : 'none';
 
@@ -472,51 +442,61 @@ function updateDashboard() {
         }
 
         G = data.portfolio;
-        renderOwner('조대표', 'jo-kr-body',   'jo-us-body',   'jo-total-eval',   'jo-total-ret',   'jo-kr-eval',   'jo-kr-ret',   'jo-us-eval',   'jo-us-ret');
-        renderOwner('공쥬님', 'wife-kr-body', 'wife-us-body', 'wife-total-eval', 'wife-total-ret', 'wife-kr-eval', 'wife-kr-ret', 'wife-us-eval', 'wife-us-ret');
+        
+        renderOwner('조대표', 'jo');
+        renderOwner('공쥬님', 'wife');
 
         let fb = 0, fe = 0;
         G.forEach(s => { fb += s.buy_amount_raw; fe += s.eval_amount_raw; });
         const fr = fb > 0 ? (fe - fb) / fb * 100 : 0;
+        const fProfit = fe - fb;
+        
         document.getElementById('family-eval').innerText = fmt(fe) + '원';
         const frEl = document.getElementById('family-ret');
-        frEl.innerText   = sign(fr) + fr.toFixed(2) + '%';
+        frEl.innerText   = sign(fr) + fr.toFixed(2) + '% (' + sign(fProfit) + fmt(Math.abs(fProfit)) + '원)';
         frEl.className   = 'card-value ' + cls(fr);
     });
 }
 
-function renderOwner(owner, krBId, usBId, cardEId, cardRId, krEId, krRId, usEId, usRId) {
+function renderOwner(owner, prefix) {
     const stocks = G.filter(s => s.owner === owner);
-    let ob=0,oe=0,krb=0,kre=0,usb=0,use_=0;
+    let ob=0, oe=0, krb=0, kre=0, usb=0, use_=0;
+    
     stocks.forEach(s => {
-        ob+=s.buy_amount_raw; oe+=s.eval_amount_raw;
-        if(s.type==='KR'){krb+=s.buy_amount_raw;kre+=s.eval_amount_raw;}
-        else             {usb+=s.buy_amount_raw;use_+=s.eval_amount_raw;}
+        ob += s.buy_amount_raw; oe += s.eval_amount_raw;
+        if(s.type === 'KR'){ krb += s.buy_amount_raw; kre += s.eval_amount_raw; }
+        else               { usb += s.buy_amount_raw; use_+= s.eval_amount_raw; }
     });
 
-    document.getElementById(krBId).innerHTML  = stocks.filter(s=>s.type==='KR').map(s=>makeRow(s,kre)).join('');
-    document.getElementById(usBId).innerHTML  = stocks.filter(s=>s.type==='US').map(s=>makeRow(s,use_)).join('');
+    document.getElementById(prefix + '-kr-body').innerHTML = stocks.filter(s=>s.type==='KR').map(s=>makeRow(s,kre)).join('');
+    document.getElementById(prefix + '-us-body').innerHTML = stocks.filter(s=>s.type==='US').map(s=>makeRow(s,use_)).join('');
 
-    const ownerRet = ob>0?(oe-ob)/ob*100:0;
-    setText(cardEId, fmt(oe)+'원');
-    setText(cardRId, '수익률 '+sign(ownerRet)+ownerRet.toFixed(2)+'%', cls(ownerRet));
+    const ownerRet = ob > 0 ? (oe - ob) / ob * 100 : 0;
+    setText(prefix + '-total-eval', fmt(oe) + '원');
+    setText(prefix + '-total-ret', '수익률 ' + sign(ownerRet) + ownerRet.toFixed(2) + '%', cls(ownerRet));
 
-    const krRet=krb>0?(kre-krb)/krb*100:0;
-    setText(krEId, fmt(kre)+'원');
-    setText(krRId, sign(krRet)+krRet.toFixed(2)+'%', cls(krRet));
+    const krRet = krb > 0 ? (kre - krb) / krb * 100 : 0;
+    const krProfit = kre - krb;
+    setText(prefix + '-kr-eval', fmt(kre) + '원');
+    setText(prefix + '-kr-profit', sign(krProfit) + fmt(Math.abs(krProfit)) + '원', cls(krProfit));
+    setText(prefix + '-kr-ret', sign(krRet) + krRet.toFixed(2) + '%', cls(krRet));
 
-    const usRet=usb>0?(use_-usb)/usb*100:0;
-    setText(usEId, fmt(use_)+'원');
-    setText(usRId, sign(usRet)+usRet.toFixed(2)+'%', cls(usRet));
+    const usRet = usb > 0 ? (use_ - usb) / usb * 100 : 0;
+    const usProfit = use_ - usb;
+    setText(prefix + '-us-eval', fmt(use_) + '원');
+    setText(prefix + '-us-profit', sign(usProfit) + fmt(Math.abs(usProfit)) + '원', cls(usProfit));
+    setText(prefix + '-us-ret', sign(usRet) + usRet.toFixed(2) + '%', cls(usRet));
 }
 
 function makeRow(s, groupEval) {
-    const w  = groupEval>0?(s.eval_amount_raw/groupEval*100).toFixed(1):'0.0';
+    const w  = groupEval > 0 ? (s.eval_amount_raw / groupEval * 100).toFixed(1) : '0.0';
+    const profit = s.eval_amount_raw - s.buy_amount_raw;
     const td = parseFloat(s.today_change);
     const mr = parseFloat(s.my_return);
-    const b  = s.type==='KR'
+    const b  = s.type === 'KR'
         ? '<span class="badge badge-kr">국내</span>'
         : '<span class="badge badge-us">해외</span>';
+        
     return `<tr>
         <td>${b}<strong>${s.name}</strong><br>
             <small style="color:var(--muted);margin-left:34px">${s.code}</small></td>
@@ -525,6 +505,7 @@ function makeRow(s, groupEval) {
         <td>${s.buy_price}</td>
         <td><strong>${s.current_price}</strong></td>
         <td style="font-weight:700">${fmt(s.eval_amount_raw)}원</td>
+        <td class="${cls(profit)}" style="font-weight:700">${sign(profit)}${fmt(Math.abs(profit))}원</td>
         <td class="${cls(td)}">${sign(td)}${s.today_change}%</td>
         <td class="${cls(mr)}" style="font-size:14px"><strong>${sign(mr)}${s.my_return}%</strong></td>
         <td>
