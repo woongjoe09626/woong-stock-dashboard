@@ -8,7 +8,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-import yfinance as yf
 
 app = FastAPI()
 app.add_middleware(
@@ -28,7 +27,21 @@ HEADERS_NAV = {
     "Referer": "https://finance.naver.com/",
 }
 
-DEFAULT_PORTFOLIO = {}
+HEADERS_YF = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+
+# 종목마다 야후에 새로 접속하면 그때마다 연결을 다시 트느라 오래 걸린다.
+# 하나를 같이 쓰면 한 번 튼 연결을 계속 재활용한다.
+_session = requests.Session()
+_session.mount("https://", requests.adapters.HTTPAdapter(pool_maxsize=30))
+
+
+class DataUnavailable(Exception):
+    """바깥에서 데이터를 못 가져왔을 때. 절대 조용히 넘기지 않는다.
+
+    예전에는 실패하면 환율을 1380원으로, 보유종목을 빈 목록으로 대신 채웠다.
+    그래서 화면은 멀쩡해 보이는데 숫자만 틀린 상태가 오래 갔다. 화면이 비는 게
+    틀린 금액을 보여주는 것보다 낫다.
+    """
 
 # ─── 캐시 ───────────────────────────────────────────────
 _cache = {"data": None, "ts": 0}
@@ -47,22 +60,57 @@ def set_cache(data):
         _cache["ts"]   = time.time()
 
 # ─── 구글 시트 ──────────────────────────────────────────
-def load_portfolio():
-    try:
-        res = requests.get(f"{GOOGLE_SHEET_URL}?action=get", timeout=10)
-        if res.status_code == 200:
+_port_cache = {"data": None, "ts": 0}
+PORT_TTL = 600  # 10분
+
+
+def load_portfolio(force=False):
+    """구글 시트에서 보유종목을 읽는다. 못 읽으면 예외를 던진다.
+
+    보유종목은 시세와 달리 거의 안 바뀌는데 시트 호출이 3~4초씩 걸려서,
+    화면을 열 때마다 그걸 기다리는 게 느림의 절반이었다. 10분 동안 기억해두고,
+    종목을 추가·수정·삭제할 때는 force=True로 반드시 새로 읽는다
+    (낡은 목록에 덮어쓰면 방금 넣은 종목이 사라진다).
+    시트를 손으로 고쳐도 늦어도 10분 안에 반영된다.
+
+    '빈 시트'와 '못 읽음'은 다르다. 예전 코드는 둘 다 빈 목록으로 취급해서,
+    시트 호출이 실패하면 보유종목이 하나도 없는 것처럼 보였다.
+    구글 앱스스크립트는 가끔 응답이 늦거나 한 번씩 실패해서 두 번 시도한다.
+    """
+    with _cache_lock:
+        if not force and _port_cache["data"] is not None \
+           and time.time() - _port_cache["ts"] < PORT_TTL:
+            return _port_cache["data"]
+
+    last = None
+    for attempt in range(2):
+        try:
+            res = requests.get(f"{GOOGLE_SHEET_URL}?action=get", timeout=15)
+            res.raise_for_status()
             data = res.json()
-            if data: return data
-    except Exception as e:
-        print("구글 시트 불러오기 실패:", e)
-    return DEFAULT_PORTFOLIO
+            if isinstance(data, dict):
+                with _cache_lock:
+                    _port_cache["data"] = data
+                    _port_cache["ts"] = time.time()
+                return data
+            last = f"예상과 다른 응답: {str(data)[:100]}"
+        except Exception as e:
+            last = f"{type(e).__name__}: {e}"
+        print(f"구글 시트 불러오기 실패 ({attempt + 1}/2):", last)
+    raise DataUnavailable(f"구글 시트를 못 읽었습니다 — {last}")
 
 def save_portfolio(data):
-    try:
-        params = {"action": "set", "data": json.dumps(data)}
-        requests.get(GOOGLE_SHEET_URL, params=params, timeout=10)
-    except Exception as e:
-        print("구글 시트 저장 실패:", e)
+    """시트에 저장한다. 저장이 안 되면 예외를 던진다.
+
+    저장 실패를 삼키면 화면에는 '성공'이 뜨는데 시트에는 안 들어가 있고,
+    다음에 새로고침하면 방금 넣은 종목이 사라져 있다.
+    """
+    params = {"action": "set", "data": json.dumps(data)}
+    res = requests.get(GOOGLE_SHEET_URL, params=params, timeout=15)
+    res.raise_for_status()
+    with _cache_lock:
+        _port_cache["data"] = data
+        _port_cache["ts"] = time.time()
 
 # ─── API 모델 ────────────────────────────────────────────
 class UpdateItem(BaseModel):
@@ -78,7 +126,7 @@ class DeleteItem(BaseModel):
 # ─── 포트폴리오 CRUD ─────────────────────────────────────
 @app.post("/api/update")
 def update_portfolio(item: UpdateItem):
-    my_port = load_portfolio()
+    my_port = load_portfolio(force=True)
     if item.id in my_port:
         my_port[item.id] = {"owner": item.owner, "code": item.code,
                             "buy_price": item.buy_price, "qty": item.qty}
@@ -89,7 +137,7 @@ def update_portfolio(item: UpdateItem):
 
 @app.post("/api/add")
 def add_portfolio(item: UpdateItem):
-    my_port = load_portfolio()
+    my_port = load_portfolio(force=True)
     my_port[f"{item.owner}_{item.code}"] = {
         "owner": item.owner, "code": item.code,
         "buy_price": item.buy_price, "qty": item.qty
@@ -100,7 +148,7 @@ def add_portfolio(item: UpdateItem):
 
 @app.post("/api/delete")
 def delete_portfolio(item: DeleteItem):
-    my_port = load_portfolio()
+    my_port = load_portfolio(force=True)
     if item.id in my_port:
         del my_port[item.id]
         save_portfolio(my_port)
@@ -109,12 +157,37 @@ def delete_portfolio(item: DeleteItem):
     return {"error": "삭제할 종목이 없습니다."}
 
 # ─── 실제 시세 가져오기 (병렬) ──────────────────────────
+def yahoo_quote(symbol):
+    """야후에서 현재가와 전일종가를 가져온다. (이름, 현재가, 등락%)
+
+    예전에는 yfinance를 썼는데 두 가지가 문제였다. 하나는 느린 것 —
+    yfinance는 값 하나 받으려고 쿠키를 먼저 받아오고 판다스 표를 만든다.
+    다른 하나는 그 쿠키 절차가 야후 쪽 사정으로 자주 깨진다는 것. 실제로
+    렌더에 올라간 채로 환율을 못 가져오고 있었다. 여기서 쓰는 주소는
+    yfinance가 내부적으로 결국 부르는 그 주소이고, 인증 절차가 없다.
+    """
+    res = _session.get(
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",
+        params={"range": "5d", "interval": "1d"},
+        headers=HEADERS_YF, timeout=10,
+    )
+    res.raise_for_status()
+    result = res.json()["chart"]["result"][0]
+    meta = result["meta"]
+
+    # 휴장일은 종가가 비어 있어서(null) 걸러낸다
+    closes = [c for c in result["indicators"]["quote"][0]["close"] if c is not None]
+    price = meta.get("regularMarketPrice") or (closes[-1] if closes else None)
+    if price is None:
+        raise DataUnavailable(f"{symbol}: 가격이 비어 있음")
+
+    prev = closes[-2] if len(closes) >= 2 else meta.get("chartPreviousClose") or price
+    change = (price - prev) / prev * 100 if prev else 0.0
+    return meta.get("shortName") or symbol.upper(), float(price), change
+
+
 def fetch_exchange_rate():
-    try:
-        fx = yf.Ticker("USDKRW=X").history(period="1d")
-        if not fx.empty: return float(fx["Close"].iloc[-1])
-    except: pass
-    return 1380.0
+    return yahoo_quote("USDKRW=X")[1]
 
 def fetch_kr_stocks(kr_tickers):
     price_map = {}
@@ -150,15 +223,8 @@ def fetch_kr_stocks(kr_tickers):
 
 def fetch_one_us_stock(ticker):
     try:
-        hist = yf.Ticker(ticker).history(period="2d")
-        if len(hist) >= 1:
-            cp = float(hist["Close"].iloc[-1])
-            pc = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else cp
-            return ticker, {
-                "name":   ticker.upper(),
-                "price":  cp,
-                "change": (cp - pc) / pc * 100 if pc else 0,
-            }
+        name, price, change = yahoo_quote(ticker)
+        return ticker, {"name": name, "price": price, "change": change}
     except Exception as e:
         print(f"미국 주식 {ticker} 실패:", e)
     return ticker, None
@@ -172,24 +238,32 @@ def build_market_data():
     price_map = {}
     kospi_info = {"price": "0.00", "change": "0.00"}
     kosdaq_info = {"price": "0.00", "change": "0.00"}
-    usd_krw = 1380.0
+    usd_krw = None
+    warnings = []
 
-    with ThreadPoolExecutor(max_workers=10) as ex:
+    # 종목 수만큼 한 번에 던진다. 10개씩 끊어 돌리면 두 번 기다리게 된다.
+    with ThreadPoolExecutor(max_workers=max(4, len(us_tickers) + 2)) as ex:
         futures = {}
-        futures["fx"] = ex.submit(fetch_exchange_rate)
+        # 환율은 미국 주식이 있을 때만 필요하다. 국내 종목만 있는 날에
+        # 환율 때문에 화면 전체가 막히면 곤란하다.
+        if us_tickers: futures["fx"] = ex.submit(fetch_exchange_rate)
         if kr_tickers: futures["kr"] = ex.submit(fetch_kr_stocks, kr_tickers)
         for t in us_tickers: futures[f"us_{t}"] = ex.submit(fetch_one_us_stock, t)
 
-        usd_krw = futures["fx"].result()
+        if "fx" in futures:
+            usd_krw = futures["fx"].result()   # 실패하면 여기서 멈춘다 (아래 주석 참고)
         if "kr" in futures:
             pm, ki, kdi = futures["kr"].result()
             price_map.update(pm)
             kospi_info  = ki
             kosdaq_info = kdi
+            if not pm:
+                warnings.append("네이버에서 국내 시세를 못 받았습니다.")
 
         for t in us_tickers:
             ticker, info = futures[f"us_{t}"].result()
             if info: price_map[ticker] = info
+            else:    warnings.append(f"{ticker} 시세를 못 받았습니다.")
 
     portfolio_list = []
     for pid, pdata in my_port.items():
@@ -220,10 +294,11 @@ def build_market_data():
         })
 
     return {
-        "usd_krw":   f"{usd_krw:,.1f}",
+        "usd_krw":   f"{usd_krw:,.1f}" if usd_krw else "-",
         "kospi":     kospi_info,
         "kosdaq":    kosdaq_info,
         "portfolio": portfolio_list,
+        "warnings":  warnings,
         "cached":    False,
     }
 
@@ -247,12 +322,18 @@ def _refresh_cache():
     with _cache_lock:
         age = time.time() - _cache["ts"]
         if age < CACHE_TTL * 0.5: return
+        previous_ts = _cache["ts"]
         _cache["ts"] = time.time()  # Cache Stampede 방지
     try:
         data = build_market_data()
         set_cache(data)
-    except:
-        pass
+    except Exception as e:
+        # 갱신에 실패했으면 시계도 되돌린다. 안 되돌리면 낡은 값이 방금 받아온
+        # 값인 척 계속 남고, 다음 방문자도 똑같이 갱신을 건너뛴다.
+        with _cache_lock:
+            if _cache["ts"] > previous_ts:
+                _cache["ts"] = previous_ts
+        print("캐시 갱신 실패:", e)
 
 # ─── HTML ────────────────────────────────────────────────
 HTML = """<!DOCTYPE html>
@@ -312,6 +393,11 @@ tfoot th, tfoot td { background: rgba(0,0,0,0.2); color: var(--text); font-weigh
 .btn-delete { background: rgba(239,68,68,.1); color: #f87171; margin-left: 4px; }
 .btn-delete:hover { background: var(--up); color: #fff; }
 .btn-add { background: linear-gradient(135deg,#6366f1,#7c3aed); color: #fff; padding: 9px 18px; border-radius: 9px; font-size: 13px; box-shadow: 0 4px 12px rgba(99,102,241,.3); }
+
+/* 숫자가 틀렸을 수 있다는 걸 화면에서 바로 보이게 한다 */
+.alert { display: none; padding: 13px 18px; border-radius: 11px; margin-bottom: 20px; font-size: 13px; font-weight: 600; line-height: 1.6; }
+.alert-error { background: rgba(239,68,68,.12); color: #fca5a5; border: 1px solid rgba(239,68,68,.3); }
+.alert-warn  { background: rgba(234,179,8,.1);  color: #fde047; border: 1px solid rgba(234,179,8,.25); }
 </style>
 </head>
 <body>
@@ -324,6 +410,8 @@ tfoot th, tfoot td { background: rgba(0,0,0,0.2); color: var(--text); font-weigh
         <div class="update-badge" id="update-time">조회 중...</div>
     </div>
 </div>
+
+<div class="alert" id="alert-bar"></div>
 
 <div class="tabs">
     <div class="tab active" onclick="switchTab(this,'panel-total')">🏛️ 가족 통합 자산</div>
@@ -419,7 +507,24 @@ const cls  = n => n > 0 ? 'up' : (n < 0 ? 'down' : '');
 
 function updateDashboard() {
     fetch('/api/market').then(r => r.json()).then(data => {
-        if (data.error) { console.error(data.error); return; }
+        const bar = document.getElementById('alert-bar');
+
+        // 실패했으면 낡은 화면을 그대로 두지 않는다. 예전에는 콘솔에만 찍혀서
+        // 자료를 못 받아온 줄 모르고 옛날 숫자를 보고 있었다.
+        if (data.error) {
+            bar.className = 'alert alert-error';
+            bar.style.display = 'block';
+            bar.innerText = '⚠️ 자료를 못 불러왔습니다. 아래 숫자는 믿지 마세요.\\n' + data.error;
+            return;
+        }
+        const warns = data.warnings || [];
+        if (warns.length) {
+            bar.className = 'alert alert-warn';
+            bar.style.display = 'block';
+            bar.innerText = '⚠️ 일부 시세를 못 받았습니다 — ' + warns.join(' / ');
+        } else {
+            bar.style.display = 'none';
+        }
 
         const badge = document.getElementById('cache-badge');
         badge.style.display = data.cached ? 'inline-block' : 'none';
