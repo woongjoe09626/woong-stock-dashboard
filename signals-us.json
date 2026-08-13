@@ -1,0 +1,78 @@
+{
+  "market": "미국장",
+  "run_date": "2026-08-14 06:39",
+  "published_at": "2026-08-14T06:51:18",
+  "regime": "강세",
+  "total_scanned": 1507,
+  "counts": {
+    "돌파": 0,
+    "눌림목": 19,
+    "BNF 역추세": 0
+  },
+  "signal_total": 19,
+  "signals": [
+    {
+      "ticker": "RELY",
+      "name": "Remitly",
+      "strategy": "눌림목",
+      "score": 87.1,
+      "price": 25.62,
+      "stop": 21.87,
+      "risk_pct": 14.6,
+      "warnings": []
+    },
+    {
+      "ticker": "WLY",
+      "name": "John Wiley & Sons",
+      "strategy": "눌림목",
+      "score": 84.6,
+      "price": 51.82,
+      "stop": 47.48,
+      "risk_pct": 8.4,
+      "warnings": []
+    },
+    {
+      "ticker": "TFIN",
+      "name": "Triumph Bancorp, Inc.",
+      "strategy": "눌림목",
+      "score": 81.8,
+      "price": 78.43,
+      "stop": 71.94,
+      "risk_pct": 8.3,
+      "warnings": []
+    },
+    {
+      "ticker": "AMN",
+      "name": "Amn Healthcare Services, Inc.",
+      "strategy": "눌림목",
+      "score": 81.7,
+      "price": 34.49,
+      "stop": 29.57,
+      "risk_pct": 14.3,
+      "warnings": []
+    },
+    {
+      "ticker": "MSM",
+      "name": "MSC Industrial Direct",
+      "strategy": "눌림목",
+      "score": 80.2,
+      "price": 121.29,
+      "stop": 115.37,
+      "risk_pct": 4.9,
+      "warnings": []
+    }
+  ],
+  "follows": [
+    {
+      "ticker": "ABBV",
+      "name": "AbbVie",
+      "added": "2026-08-12",
+      "entry": 247.7,
+      "price": 250.82,
+      "change_pct": 1.26,
+      "stop": 236.38,
+      "stop_broken": false,
+      "warnings": []
+    }
+  ]
+}
