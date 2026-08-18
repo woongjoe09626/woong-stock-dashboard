@@ -21,12 +21,6 @@ GOOGLE_SHEET_URL = os.environ.get(
     "MY_GOOGLE_SHEET_URL",
     "https://script.google.com/macros/s/AKfycbx1XXKA_GKnIsnaNJqLH0RCCY_iDxSIDv_xalVyuAB6-9gUVYN5r4cy1pNixs1XkSMM/exec"
 )
-
-HEADERS_NAV = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Referer": "https://finance.naver.com/",
-}
-
 HEADERS_YF = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
 # 종목마다 야후에 새로 접속하면 그때마다 연결을 다시 트느라 오래 걸린다.
@@ -189,37 +183,81 @@ def yahoo_quote(symbol):
 def fetch_exchange_rate():
     return yahoo_quote("USDKRW=X")[1]
 
-def fetch_kr_stocks(kr_tickers):
-    price_map = {}
-    kospi_info  = {"price": "0.00", "change": "0.00"}
-    kosdaq_info = {"price": "0.00", "change": "0.00"}
+# 국내 종목코드(6자리)를 야후 심볼로 바꾸려면 .KS(코스피)/.KQ(코스닥)를 붙여야 하는데,
+# 어느 쪽인지는 코드만 봐서 알 수 없다. 게다가 야후는 틀린 접미사에도 404를 내지 않고
+# 엉뚱한 종목을 돌려준다 — 파마리서치(214450)를 .KS로 물으면 141,300원짜리 다른 게
+# 나오고, 실제 393,000원은 .KQ에 있다. 그래서 절대 추측하지 않고 검색으로 확인한다.
+# 심볼은 안 바뀌므로 한 번 찾으면 계속 재사용한다.
+_symbol_cache = {}
+
+
+def korean_symbol(code):
+    """국내 6자리 코드 -> 야후 심볼(005930.KS). 못 찾으면 예외."""
+    with _cache_lock:
+        if code in _symbol_cache:
+            return _symbol_cache[code]
+
+    res = _session.get("https://query2.finance.yahoo.com/v1/finance/search",
+                       params={"q": code, "quotesCount": 6, "newsCount": 0},
+                       headers=HEADERS_YF, timeout=10)
+    res.raise_for_status()
+    for q in res.json().get("quotes", []):
+        symbol = q.get("symbol") or ""
+        if symbol.startswith(code + "."):
+            with _cache_lock:
+                _symbol_cache[code] = symbol
+            return symbol
+    raise DataUnavailable(f"{code}: 야후에서 종목을 못 찾았습니다")
+
+
+# 야후는 국내 종목 이름을 영어로만 준다 ("HyundaiMtr(2PB)"). 화면에서 읽기 어려우니
+# 한글 이름만 네이버 검색에서 가져온다. 시세용 주소와는 다른 곳이고, 이름은 안 바뀌므로
+# 한 번만 부른다. 실패해도 영어 이름으로 넘어가면 그만이라 숫자에는 영향이 없다.
+_name_cache = {}
+
+
+def korean_name(code, fallback):
+    with _cache_lock:
+        if code in _name_cache:
+            return _name_cache[code]
+    name = fallback
     try:
-        query = f"SERVICE_INDEX:KOSPI,KOSDAQ|SERVICE_ITEM:{','.join(kr_tickers)}"
-        res = requests.get("https://polling.finance.naver.com/api/realtime",
-                           headers=HEADERS_NAV, params={"query": query}, timeout=5)
-        areas = res.json()["result"]["areas"]
-        idx = areas[0]["datas"]
-
-        kp_val = int(idx[0]["nv"]) / 100
-        kp_chg = int(idx[0]["cv"]) / 100
-        kp_pct = kp_chg / (kp_val - kp_chg) * 100 if (kp_val - kp_chg) else 0
-        kd_val = int(idx[1]["nv"]) / 100
-        kd_chg = int(idx[1]["cv"]) / 100
-        kd_pct = kd_chg / (kd_val - kd_chg) * 100 if (kd_val - kd_chg) else 0
-
-        kospi_info  = {"price": f"{kp_val:,.2f}", "change": f"{kp_pct:.2f}"}
-        kosdaq_info = {"price": f"{kd_val:,.2f}", "change": f"{kd_pct:.2f}"}
-
-        if len(areas) > 1:
-            for item in areas[1]["datas"]:
-                price_map[item["cd"]] = {
-                    "name":   item.get("nm", "이름없음"),
-                    "price":  float(item["nv"]),
-                    "change": float(item["cr"]),
-                }
+        res = _session.get("https://m.stock.naver.com/front-api/search/autoComplete",
+                           params={"query": code, "target": "stock"},
+                           headers=HEADERS_YF, timeout=8)
+        res.raise_for_status()
+        for item in (res.json().get("result") or {}).get("items") or []:
+            if (item.get("code") or "") == code and item.get("name"):
+                name = item["name"]
+                break
     except Exception as e:
-        print("네이버 조회 실패:", e)
-    return price_map, kospi_info, kosdaq_info
+        print(f"{code} 한글 이름 조회 실패(영문명으로 표시):", e)
+    with _cache_lock:
+        _name_cache[code] = name
+    return name
+
+
+def fetch_one_kr_stock(code):
+    try:
+        name, price, change = yahoo_quote(korean_symbol(code))
+        return code, {"name": korean_name(code, name), "price": price, "change": change}
+    except Exception as e:
+        print(f"국내 주식 {code} 실패:", e)
+    return code, None
+
+
+def fetch_kr_indices():
+    """코스피/코스닥 지수. 하나가 실패해도 나머지는 살린다."""
+    out = {}
+    for key, symbol in (("kospi", "^KS11"), ("kosdaq", "^KQ11")):
+        try:
+            _, price, change = yahoo_quote(symbol)
+            out[key] = {"price": f"{price:,.2f}", "change": f"{change:.2f}"}
+        except Exception as e:
+            print(f"{key} 지수 실패:", e)
+            out[key] = None
+    return out
+
 
 def fetch_one_us_stock(ticker):
     try:
@@ -236,32 +274,33 @@ def build_market_data():
     us_tickers = list(set(v["code"] for v in my_port.values() if not v["code"].isdigit()))
 
     price_map = {}
-    kospi_info = {"price": "0.00", "change": "0.00"}
-    kosdaq_info = {"price": "0.00", "change": "0.00"}
+    kospi_info = None
+    kosdaq_info = None
     usd_krw = None
     warnings = []
 
     # 종목 수만큼 한 번에 던진다. 10개씩 끊어 돌리면 두 번 기다리게 된다.
-    with ThreadPoolExecutor(max_workers=max(4, len(us_tickers) + 2)) as ex:
+    everything = len(us_tickers) + len(kr_tickers) + 2
+    with ThreadPoolExecutor(max_workers=max(4, everything)) as ex:
         futures = {}
         # 환율은 미국 주식이 있을 때만 필요하다. 국내 종목만 있는 날에
         # 환율 때문에 화면 전체가 막히면 곤란하다.
         if us_tickers: futures["fx"] = ex.submit(fetch_exchange_rate)
-        if kr_tickers: futures["kr"] = ex.submit(fetch_kr_stocks, kr_tickers)
+        futures["idx"] = ex.submit(fetch_kr_indices)
         for t in us_tickers: futures[f"us_{t}"] = ex.submit(fetch_one_us_stock, t)
+        for c in kr_tickers: futures[f"kr_{c}"] = ex.submit(fetch_one_kr_stock, c)
 
         if "fx" in futures:
             usd_krw = futures["fx"].result()   # 실패하면 여기서 멈춘다 (아래 주석 참고)
-        if "kr" in futures:
-            pm, ki, kdi = futures["kr"].result()
-            price_map.update(pm)
-            kospi_info  = ki
-            kosdaq_info = kdi
-            if not pm:
-                warnings.append("네이버에서 국내 시세를 못 받았습니다.")
+        idx = futures["idx"].result()
+        kospi_info, kosdaq_info = idx["kospi"], idx["kosdaq"]
+        if kospi_info is None or kosdaq_info is None:
+            warnings.append("지수를 못 받았습니다.")
 
-        for t in us_tickers:
-            ticker, info = futures[f"us_{t}"].result()
+        # 종목 하나가 빠지면 그 종목만 경고한다. 예전에는 국내 전체를 한 번에 받아서,
+        # 응답이 조금만 어긋나도 8종목이 통째로 0원이 되고 경고도 안 떴다.
+        for t in us_tickers + kr_tickers:
+            ticker, info = futures[f"{'us' if t in us_tickers else 'kr'}_{t}"].result()
             if info: price_map[ticker] = info
             else:    warnings.append(f"{ticker} 시세를 못 받았습니다.")
 
