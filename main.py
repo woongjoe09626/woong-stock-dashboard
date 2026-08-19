@@ -107,38 +107,72 @@ def save_portfolio(data):
         _port_cache["ts"] = time.time()
 
 # ─── API 모델 ────────────────────────────────────────────
-class UpdateItem(BaseModel):
-    id: str
+class AddItem(BaseModel):
     owner: str
     code: str
     buy_price: float
     qty: int
+    note: str = ""
+
+
+class EditItem(BaseModel):
+    """한 칸만 고칠 수 있게 전부 선택 항목이다.
+
+    예전에는 수정하려면 주인·종목·단가·수량을 순서대로 다 다시 넣어야 했다.
+    수량만 바꾸고 싶어도 나머지를 또 입력해야 해서 번거로웠다.
+    이제 보낸 항목만 바뀌고 나머지는 그대로 둔다.
+    """
+    id: str
+    owner: str | None = None
+    code: str | None = None
+    buy_price: float | None = None
+    qty: int | None = None
+    note: str | None = None
+
 
 class DeleteItem(BaseModel):
     id: str
 
+
 # ─── 포트폴리오 CRUD ─────────────────────────────────────
 @app.post("/api/update")
-def update_portfolio(item: UpdateItem):
+def update_portfolio(item: EditItem):
     my_port = load_portfolio(force=True)
-    if item.id in my_port:
-        my_port[item.id] = {"owner": item.owner, "code": item.code,
-                            "buy_price": item.buy_price, "qty": item.qty}
-        save_portfolio(my_port)
-        set_cache(None)
-        return {"status": "success"}
-    return {"error": "종목을 찾을 수 없습니다."}
+    if item.id not in my_port:
+        return {"error": "종목을 찾을 수 없습니다."}
+
+    entry = dict(my_port[item.id])
+    for field in ("owner", "code", "buy_price", "qty", "note"):
+        value = getattr(item, field)
+        if value is not None:
+            entry[field] = value
+
+    # 주인이나 종목코드가 바뀌면 저장 열쇠도 따라 바뀐다.
+    # 옛 열쇠를 안 지우면 같은 종목이 두 개로 늘어난다.
+    new_id = f"{entry['owner']}_{entry['code']}"
+    if new_id != item.id:
+        if new_id in my_port:
+            return {"error": "같은 주인의 같은 종목이 이미 있습니다."}
+        del my_port[item.id]
+    my_port[new_id] = entry
+
+    save_portfolio(my_port)
+    set_cache(None)
+    return {"status": "success", "id": new_id}
+
 
 @app.post("/api/add")
-def add_portfolio(item: UpdateItem):
+def add_portfolio(item: AddItem):
     my_port = load_portfolio(force=True)
-    my_port[f"{item.owner}_{item.code}"] = {
-        "owner": item.owner, "code": item.code,
-        "buy_price": item.buy_price, "qty": item.qty
-    }
+    key = f"{item.owner}_{item.code}"
+    if key in my_port:
+        return {"error": "이미 있는 종목입니다. 수정으로 바꿔주세요."}
+    my_port[key] = {"owner": item.owner, "code": item.code,
+                    "buy_price": item.buy_price, "qty": item.qty, "note": item.note}
     save_portfolio(my_port)
     set_cache(None)
     return {"status": "success"}
+
 
 @app.post("/api/delete")
 def delete_portfolio(item: DeleteItem):
@@ -149,6 +183,7 @@ def delete_portfolio(item: DeleteItem):
         set_cache(None)
         return {"status": "success"}
     return {"error": "삭제할 종목이 없습니다."}
+
 
 # ─── 실제 시세 가져오기 (병렬) ──────────────────────────
 def yahoo_quote(symbol):
@@ -320,6 +355,7 @@ def build_market_data():
         portfolio_list.append({
             "id":              pid,
             "owner":           owner,
+            "note":            pdata.get("note", ""),
             "type":            "KR" if is_kr else "US",
             "code":            code,
             "name":            p_info["name"],
@@ -433,6 +469,72 @@ tfoot th, tfoot td { background: rgba(0,0,0,0.2); color: var(--text); font-weigh
 .btn-delete:hover { background: var(--up); color: #fff; }
 .btn-add { background: linear-gradient(135deg,#6366f1,#7c3aed); color: #fff; padding: 9px 18px; border-radius: 9px; font-size: 13px; box-shadow: 0 4px 12px rgba(99,102,241,.3); }
 
+/* 칸마다 붙는 연필 — 그 값 하나만 고친다 */
+.pen { background: none; border: none; cursor: pointer; opacity: .35; font-size: 11px;
+       padding: 0 2px; transition: opacity .15s; }
+.pen:hover { opacity: 1; }
+td:hover .pen { opacity: .8; }
+
+/* 메모 — 매수·매도 시나리오를 적어두는 자리 */
+.name-line { display: flex; align-items: center; gap: 2px; }
+.sub { color: var(--muted); font-size: 11px; margin-left: 34px; font-family: 'JetBrains Mono', monospace; }
+.memo { margin-top: 6px; font-size: 11.5px; line-height: 1.5; color: #a5b4fc; cursor: pointer;
+        white-space: pre-wrap; word-break: keep-all; max-width: 30ch;
+        border-left: 2px solid rgba(99,102,241,.4); padding: 2px 0 2px 8px; }
+.memo:hover { color: #c7d2fe; }
+.memo.empty { color: var(--muted); opacity: .45; border-left-color: transparent; font-style: italic; }
+
+/* 메모 입력창 */
+.modal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 50;
+         align-items: center; justify-content: center; padding: 20px; }
+.modal-box { background: var(--card); border: 1px solid var(--border); border-radius: 16px;
+             padding: 22px; width: 100%; max-width: 520px; }
+.modal-box h3 { font-size: 15px; margin-bottom: 4px; }
+.modal-box .hint { font-size: 11.5px; color: var(--muted); margin-bottom: 14px; }
+.modal-box textarea { width: 100%; min-height: 190px; background: #0f172a; color: var(--text);
+                      border: 1px solid var(--border); border-radius: 10px; padding: 12px;
+                      font-size: 13px; line-height: 1.65; resize: vertical; font-family: inherit; }
+.modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+.btn-ghost { background: rgba(255,255,255,.06); color: var(--muted); padding: 9px 16px; border-radius: 9px; }
+.btn-save { background: var(--accent); color: #fff; padding: 9px 18px; border-radius: 9px; }
+
+/* ── 모바일: 표를 카드로 바꾼다 ──────────────────────────
+   가로 스크롤로 10칸을 보는 건 폰에서 못 쓴다. 한 종목을 한 장으로 묶고
+   중요한 것(종목·수익률)을 첫 줄에, 나머지는 둘째 줄에 두 칸씩 접어 넣는다. */
+@media (max-width: 767px) {
+  body { padding: 14px; }
+  .table-wrap { border: none; background: none; overflow: visible; }
+  table { min-width: 0; display: block; }
+  thead { display: none; }
+  tbody { display: block; }
+  tbody tr { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px;
+             background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+             padding: 14px; margin-bottom: 10px; }
+  tbody td { display: flex; justify-content: space-between; align-items: baseline;
+             border: none; padding: 0; font-size: 12.5px; }
+  tbody td::before { content: attr(data-label); color: var(--muted); font-size: 10.5px;
+                     margin-right: 8px; white-space: nowrap; }
+  /* 종목명과 수익률은 한 줄을 통째로 쓴다 */
+  tbody td[data-label="종목"] { grid-column: 1 / -1; flex-direction: column; align-items: stretch; }
+  tbody td[data-label="종목"]::before { display: none; }
+  tbody td[data-label="수익률"] { grid-column: 1 / -1; justify-content: flex-end;
+                                  border-top: 1px solid var(--border); padding-top: 8px; font-size: 15px; }
+  tbody td[data-label="관리"] { grid-column: 1 / -1; justify-content: flex-end; }
+  tbody td[data-label="관리"]::before { display: none; }
+  .memo { max-width: none; }
+
+  tfoot { display: block; }
+  tfoot tr { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px;
+             background: rgba(0,0,0,.25); border-radius: 12px; padding: 14px; }
+  tfoot th, tfoot td { display: flex; justify-content: space-between; border: none; padding: 0; }
+  tfoot th[colspan] { grid-column: 1 / -1; }
+  .grid { grid-template-columns: 1fr 1fr; gap: 10px; }
+  .card { padding: 14px; }
+  .card-value { font-size: 17px; }
+  .tab { padding: 9px 14px; font-size: 13px; }
+  .logo { font-size: 20px; }
+}
+
 /* 숫자가 틀렸을 수 있다는 걸 화면에서 바로 보이게 한다 */
 .alert { display: none; padding: 13px 18px; border-radius: 11px; margin-bottom: 20px; font-size: 13px; font-weight: 600; line-height: 1.6; }
 .alert-error { background: rgba(239,68,68,.12); color: #fca5a5; border: 1px solid rgba(239,68,68,.3); }
@@ -451,6 +553,23 @@ tfoot th, tfoot td { background: rgba(0,0,0,0.2); color: var(--text); font-weigh
 </div>
 
 <div class="alert" id="alert-bar"></div>
+
+<!-- 메모 — 매수·매도 시나리오를 적어두는 자리. 여러 줄을 써야 해서 따로 창을 띄운다 -->
+<div class="modal" id="note-modal" onclick="if(event.target===this) closeNote()">
+  <div class="modal-box">
+    <h3 id="note-title"></h3>
+    <div class="hint">매수·매도 시나리오를 적어두세요. 저장하면 표에 바로 보입니다.</div>
+    <textarea id="note-text" placeholder="예)
+매수: 12만원 아래로 눌리면 분할 1차
+매도: 실적 발표 전 절반 익절
+손절: 10만 5천원 종가 이탈
+근거: 신규 수주 잔고가 계속 늘고 있음"></textarea>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeNote()">취소</button>
+      <button class="btn btn-save" onclick="saveNote()">저장</button>
+    </div>
+  </div>
+</div>
 
 <div class="tabs">
     <div class="tab active" onclick="switchTab(this,'panel-total')">🏛️ 가족 통합 자산</div>
@@ -502,15 +621,15 @@ tfoot th, tfoot td { background: rgba(0,0,0,0.2); color: var(--text); font-weigh
 <div id="panel-jo" class="tab-panel">
     <div class="section-title">🇰🇷 국내 주식</div>
     <div class="table-wrap"><table>
-        <thead><tr><th>종목명</th><th>보유수량</th><th>비중</th><th>매입단가</th><th>현재가</th><th>평가금액</th><th>평가손익</th><th>오늘등락</th><th>수익률</th><th>관리</th></tr></thead>
+        <thead><tr><th>종목명</th><th>보유수량</th><th>비중</th><th>매입단가</th><th>현재가</th><th>매입총액</th><th>평가금액</th><th>평가손익</th><th>오늘등락</th><th>수익률</th><th>관리</th></tr></thead>
         <tbody id="jo-kr-body"></tbody>
-        <tfoot><tr><th colspan="5">국내 소계</th><td id="jo-kr-eval">-</td><td id="jo-kr-profit">-</td><td>-</td><td id="jo-kr-ret">-</td><td></td></tr></tfoot>
+        <tfoot><tr><th colspan="5">국내 소계</th><td id="jo-kr-buy">-</td><td id="jo-kr-eval">-</td><td id="jo-kr-profit">-</td><td>-</td><td id="jo-kr-ret">-</td><td></td></tr></tfoot>
     </table></div>
     <div class="section-title">🇺🇸 해외 주식</div>
     <div class="table-wrap"><table>
-        <thead><tr><th>종목명</th><th>보유수량</th><th>비중</th><th>매입단가</th><th>현재가</th><th>평가금액(원화)</th><th>평가손익(원화)</th><th>오늘등락</th><th>수익률</th><th>관리</th></tr></thead>
+        <thead><tr><th>종목명</th><th>보유수량</th><th>비중</th><th>매입단가</th><th>현재가</th><th>매입총액(원화)</th><th>평가금액(원화)</th><th>평가손익(원화)</th><th>오늘등락</th><th>수익률</th><th>관리</th></tr></thead>
         <tbody id="jo-us-body"></tbody>
-        <tfoot><tr><th colspan="5">해외 소계</th><td id="jo-us-eval">-</td><td id="jo-us-profit">-</td><td>-</td><td id="jo-us-ret">-</td><td></td></tr></tfoot>
+        <tfoot><tr><th colspan="5">해외 소계</th><td id="jo-us-buy">-</td><td id="jo-us-eval">-</td><td id="jo-us-profit">-</td><td>-</td><td id="jo-us-ret">-</td><td></td></tr></tfoot>
     </table></div>
 </div>
 
@@ -518,15 +637,15 @@ tfoot th, tfoot td { background: rgba(0,0,0,0.2); color: var(--text); font-weigh
 <div id="panel-wife" class="tab-panel">
     <div class="section-title">🇰🇷 국내 주식</div>
     <div class="table-wrap"><table>
-        <thead><tr><th>종목명</th><th>보유수량</th><th>비중</th><th>매입단가</th><th>현재가</th><th>평가금액</th><th>평가손익</th><th>오늘등락</th><th>수익률</th><th>관리</th></tr></thead>
+        <thead><tr><th>종목명</th><th>보유수량</th><th>비중</th><th>매입단가</th><th>현재가</th><th>매입총액</th><th>평가금액</th><th>평가손익</th><th>오늘등락</th><th>수익률</th><th>관리</th></tr></thead>
         <tbody id="wife-kr-body"></tbody>
-        <tfoot><tr><th colspan="5">국내 소계</th><td id="wife-kr-eval">-</td><td id="wife-kr-profit">-</td><td>-</td><td id="wife-kr-ret">-</td><td></td></tr></tfoot>
+        <tfoot><tr><th colspan="5">국내 소계</th><td id="wife-kr-buy">-</td><td id="wife-kr-eval">-</td><td id="wife-kr-profit">-</td><td>-</td><td id="wife-kr-ret">-</td><td></td></tr></tfoot>
     </table></div>
     <div class="section-title">🇺🇸 해외 주식</div>
     <div class="table-wrap"><table>
-        <thead><tr><th>종목명</th><th>보유수량</th><th>비중</th><th>매입단가</th><th>현재가</th><th>평가금액(원화)</th><th>평가손익(원화)</th><th>오늘등락</th><th>수익률</th><th>관리</th></tr></thead>
+        <thead><tr><th>종목명</th><th>보유수량</th><th>비중</th><th>매입단가</th><th>현재가</th><th>매입총액(원화)</th><th>평가금액(원화)</th><th>평가손익(원화)</th><th>오늘등락</th><th>수익률</th><th>관리</th></tr></thead>
         <tbody id="wife-us-body"></tbody>
-        <tfoot><tr><th colspan="5">해외 소계</th><td id="wife-us-eval">-</td><td id="wife-us-profit">-</td><td>-</td><td id="wife-us-ret">-</td><td></td></tr></tfoot>
+        <tfoot><tr><th colspan="5">해외 소계</th><td id="wife-us-buy">-</td><td id="wife-us-eval">-</td><td id="wife-us-profit">-</td><td>-</td><td id="wife-us-ret">-</td><td></td></tr></tfoot>
     </table></div>
 </div>
 
@@ -621,12 +740,14 @@ function renderOwner(owner, prefix) {
 
     const krRet = krb > 0 ? (kre - krb) / krb * 100 : 0;
     const krProfit = kre - krb;
+    setText(prefix + '-kr-buy', fmt(krb) + '원');
     setText(prefix + '-kr-eval', fmt(kre) + '원');
     setText(prefix + '-kr-profit', sign(krProfit) + fmt(Math.abs(krProfit)) + '원', cls(krProfit));
     setText(prefix + '-kr-ret', sign(krRet) + krRet.toFixed(2) + '%', cls(krRet));
 
     const usRet = usb > 0 ? (use_ - usb) / usb * 100 : 0;
     const usProfit = use_ - usb;
+    setText(prefix + '-us-buy', fmt(usb) + '원');
     setText(prefix + '-us-eval', fmt(use_) + '원');
     setText(prefix + '-us-profit', sign(usProfit) + fmt(Math.abs(usProfit)) + '원', cls(usProfit));
     setText(prefix + '-us-ret', sign(usRet) + usRet.toFixed(2) + '%', cls(usRet));
@@ -640,41 +761,93 @@ function makeRow(s, groupEval) {
     const b  = s.type === 'KR'
         ? '<span class="badge badge-kr">국내</span>'
         : '<span class="badge badge-us">해외</span>';
-        
-    return `<tr>
-        <td>${b}<strong>${s.name}</strong><br>
-            <small style="color:var(--muted);margin-left:34px">${s.code}</small></td>
-        <td style="font-weight:600">${s.qty.toLocaleString()}주</td>
-        <td style="color:var(--muted)">${w}%</td>
-        <td>${s.buy_price}</td>
-        <td><strong>${s.current_price}</strong></td>
-        <td style="font-weight:700">${fmt(s.eval_amount_raw)}원</td>
-        <td class="${cls(profit)}" style="font-weight:700">${sign(profit)}${fmt(Math.abs(profit))}원</td>
-        <td class="${cls(td)}">${sign(td)}${s.today_change}%</td>
-        <td class="${cls(mr)}" style="font-size:14px"><strong>${sign(mr)}${s.my_return}%</strong></td>
-        <td>
-            <button class="btn btn-edit"
-                onclick="editStock('${s.id}','${s.owner}','${s.code}','${s.name}','${s.buy_price}',${s.qty})">수정</button>
-            <button class="btn btn-delete"
-                onclick="deleteStock('${s.id}','${s.name}')">❌</button>
+    const unit = s.type === 'KR' ? '원' : '$';
+
+    /* 칸마다 연필을 붙여서 그 값 하나만 고치게 한다.
+       예전에는 수정을 누르면 주인·종목·단가·수량을 순서대로 다 다시 넣어야 했다. */
+    const pencil = (field, label, value) =>
+        `<button class="pen" title="${label} 수정"
+            onclick="editField('${s.id}','${field}','${label}',${JSON.stringify(String(value))})">✏️</button>`;
+
+    const noteText = (s.note || '').trim();
+
+    return `<tr data-id="${s.id}">
+        <td data-label="종목">
+            <div class="name-line">${b}<strong>${s.name}</strong></div>
+            <div class="sub">${s.code}</div>
+            <div class="memo ${noteText ? '' : 'empty'}" onclick="editNote('${s.id}')"
+                 title="눌러서 메모 쓰기">${noteText ? esc(noteText) : '＋ 메모'}</div>
+        </td>
+        <td data-label="보유수량" style="font-weight:600">${s.qty.toLocaleString()}주 ${pencil('qty','보유수량',s.qty)}</td>
+        <td data-label="비중" style="color:var(--muted)">${w}%</td>
+        <td data-label="매입단가">${s.buy_price} ${pencil('buy_price','매입단가',String(s.buy_price).replace(/[원$,]/g,''))}</td>
+        <td data-label="현재가"><strong>${s.current_price}</strong></td>
+        <td data-label="매입총액" style="font-weight:600;color:var(--muted)">${fmt(s.buy_amount_raw)}원</td>
+        <td data-label="평가금액" style="font-weight:700">${fmt(s.eval_amount_raw)}원</td>
+        <td data-label="평가손익" class="${cls(profit)}" style="font-weight:700">${sign(profit)}${fmt(Math.abs(profit))}원</td>
+        <td data-label="오늘등락" class="${cls(td)}">${sign(td)}${s.today_change}%</td>
+        <td data-label="수익률" class="${cls(mr)}" style="font-size:14px"><strong>${sign(mr)}${s.my_return}%</strong></td>
+        <td data-label="관리">
+            <button class="btn btn-delete" onclick="deleteStock('${s.id}','${s.name}')">❌</button>
         </td>
     </tr>`;
 }
 
+function esc(t) {
+    return String(t).replace(/[&<>"]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));
+}
+
 function setText(id, text, extraClass) {
     const el = document.getElementById(id);
+    if (!el) return;
     el.innerText = text;
     if (extraClass !== undefined) el.className = extraClass;
 }
 
-function editStock(id, owner, code, name, price, qty) {
-    const clean = price.replace(/[원$,]/g, '');
-    const p = prompt(`[${owner} — ${name}]\\n새로운 매입단가 (숫자만):`, clean); if(!p) return;
-    const q = prompt(`[${owner} — ${name}]\\n새로운 보유수량:`, qty);            if(!q) return;
-    fetch('/api/update', {
+/* 보낸 항목만 바뀌고 나머지는 그대로 둔다 (서버가 합쳐준다) */
+function save(patch) {
+    return fetch('/api/update', {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({id, owner, code, buy_price:parseFloat(p), qty:parseInt(q)})
-    }).then(()=>updateDashboard());
+        body: JSON.stringify(patch)
+    }).then(r => r.json()).then(r => {
+        if (r.error) { alert(r.error); return; }
+        updateDashboard();
+    }).catch(e => alert('저장 실패: ' + e));
+}
+
+function editField(id, field, label, current) {
+    const v = prompt(`${label} 입력:`, current);
+    if (v === null) return;
+    const num = parseFloat(String(v).replace(/[,원$\\s]/g, ''));
+    if (isNaN(num)) return alert('숫자만 입력해주세요.');
+    save({id, [field]: field === 'qty' ? Math.round(num) : num});
+}
+
+/* 메모 — 매수·매도 시나리오를 적어두는 자리.
+   여러 줄을 쓸 수 있어야 해서 prompt 대신 화면 위에 창을 띄운다. */
+let noteTarget = null;
+
+function editNote(id) {
+    const s = G.find(x => x.id === id);
+    if (!s) return;
+    noteTarget = id;
+    document.getElementById('note-title').innerText = `${s.name} (${s.code})`;
+    const box = document.getElementById('note-text');
+    box.value = s.note || '';
+    document.getElementById('note-modal').style.display = 'flex';
+    box.focus();
+}
+
+function closeNote() {
+    document.getElementById('note-modal').style.display = 'none';
+    noteTarget = null;
+}
+
+function saveNote() {
+    const text = document.getElementById('note-text').value;
+    const id = noteTarget;
+    closeNote();
+    save({id, note: text});
 }
 
 function addStock() {
@@ -683,10 +856,16 @@ function addStock() {
     const c = prompt('종목코드 6자리 또는 미국 티커 (예: AAPL, TSLA):'); if(!c) return;
     const p = prompt('매입단가 (원화 또는 달러 숫자만):','100');          if(!p) return;
     const q = prompt('보유수량:','10');                                    if(!q) return;
+    const buy = parseFloat(String(p).replace(/[,원$\\s]/g,''));
+    const qty = parseInt(String(q).replace(/[,주\\s]/g,''));
+    if (isNaN(buy) || isNaN(qty)) return alert('단가와 수량은 숫자로 입력해주세요.');
     fetch('/api/add', {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({id:'', owner, code:c.trim().toUpperCase(), buy_price:parseFloat(p), qty:parseInt(q)})
-    }).then(()=>updateDashboard());
+        body: JSON.stringify({owner, code:c.trim().toUpperCase(), buy_price:buy, qty})
+    }).then(r=>r.json()).then(r=>{
+        if (r.error) return alert(r.error);
+        updateDashboard();
+    });
 }
 
 function deleteStock(id, name) {
