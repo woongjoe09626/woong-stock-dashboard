@@ -764,10 +764,13 @@ function makeRow(s, groupEval) {
     const unit = s.type === 'KR' ? '원' : '$';
 
     /* 칸마다 연필을 붙여서 그 값 하나만 고치게 한다.
-       예전에는 수정을 누르면 주인·종목·단가·수량을 순서대로 다 다시 넣어야 했다. */
+       예전에는 수정을 누르면 주인·종목·단가·수량을 순서대로 다 다시 넣어야 했다.
+
+       값을 onclick 안에 직접 적지 않는다. 따옴표가 든 값이 오면 속성이 거기서 끊겨
+       버튼이 아예 안 눌린다(실제로 그랬다). data-로 넘기고 클릭은 아래에서 한 번에 받는다. */
     const pencil = (field, label, value) =>
-        `<button class="pen" title="${label} 수정"
-            onclick="editField('${s.id}','${field}','${label}',${JSON.stringify(String(value))})">✏️</button>`;
+        `<button class="pen" title="${label} 수정" data-edit="${field}"
+                 data-label="${esc(label)}" data-value="${esc(value)}">✏️</button>`;
 
     const noteText = (s.note || '').trim();
 
@@ -792,6 +795,16 @@ function makeRow(s, groupEval) {
         </td>
     </tr>`;
 }
+
+/* 연필·삭제 클릭을 문서 한 곳에서 받는다.
+   표는 갱신될 때마다 새로 그려지는데, 버튼마다 따로 달면 그때마다 다시 달아야 한다. */
+document.addEventListener('click', (ev) => {
+    const pen = ev.target.closest('.pen');
+    if (!pen) return;
+    const tr = pen.closest('tr');
+    if (!tr) return;
+    editField(tr.dataset.id, pen.dataset.edit, pen.dataset.label, pen.dataset.value);
+});
 
 function esc(t) {
     return String(t).replace(/[&<>"]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));
