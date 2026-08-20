@@ -468,6 +468,9 @@ tfoot th, tfoot td { background: rgba(0,0,0,0.2); color: var(--text); font-weigh
 .btn-delete { background: rgba(239,68,68,.1); color: #f87171; margin-left: 4px; }
 .btn-delete:hover { background: var(--up); color: #fff; }
 .btn-add { background: linear-gradient(135deg,#6366f1,#7c3aed); color: #fff; padding: 9px 18px; border-radius: 9px; font-size: 13px; box-shadow: 0 4px 12px rgba(99,102,241,.3); }
+.btn-report { background: rgba(255,255,255,.07); color: var(--text); padding: 9px 16px;
+              border-radius: 9px; font-size: 13px; text-decoration: none; display: inline-block; }
+.btn-report:hover { background: rgba(255,255,255,.14); }
 
 /* 칸마다 붙는 연필 — 그 값 하나만 고친다 */
 .pen { background: none; border: none; cursor: pointer; opacity: .35; font-size: 11px;
@@ -547,6 +550,7 @@ td:hover .pen { opacity: .8; }
     <div class="logo">👑 조대표 패밀리 오피스</div>
     <div class="header-right">
         <span class="cache-badge" id="cache-badge">⚡ 캐시 데이터</span>
+        <a class="btn btn-report" href="/report" target="_blank" rel="noopener">📊 오늘 스크리너</a>
         <button class="btn btn-add" onclick="addStock()">➕ 자산 추가</button>
         <div class="update-badge" id="update-time">조회 중...</div>
     </div>
@@ -897,6 +901,42 @@ document.addEventListener('visibilitychange', ()=>{
 </script>
 </body>
 </html>"""
+
+# ─── 스크리너 리포트 ─────────────────────────────────────
+# 스크리너가 매일 data 브랜치에 올려두는 리포트를 그대로 보여준다.
+#
+# 왜 여기서 중계하느냐 — 깃허브 raw 주소는 HTML을 '글자'로 내려줘서 브라우저가
+# 화면으로 그리지 않고 소스 코드를 보여준다. 여기를 거치면 제대로 열린다.
+# 덕분에 아이폰에서 리포트를 못 보던 문제도 풀린다(로컬 HTML 파일을 못 열어서
+# 여태 카드 이미지로만 봤다).
+REPORT_URL = ("https://raw.githubusercontent.com/woongjoe09626/"
+              "woong-stock-dashboard/data/report-us.html")
+_report_cache = {"html": None, "ts": 0}
+REPORT_TTL = 300
+
+
+@app.get("/report", response_class=HTMLResponse)
+def get_report():
+    with _cache_lock:
+        if _report_cache["html"] and time.time() - _report_cache["ts"] < REPORT_TTL:
+            return _report_cache["html"]
+    try:
+        res = _session.get(REPORT_URL, headers=HEADERS_YF, timeout=15)
+        res.raise_for_status()
+        res.encoding = "utf-8"
+        html = res.text
+    except Exception as e:
+        # 조용히 빈 화면을 주지 않는다. 왜 안 나오는지 화면에 적는다.
+        return HTMLResponse(
+            "<body style='background:#0b0f19;color:#f3f4f6;font-family:sans-serif;padding:40px'>"
+            f"<h2>리포트를 못 불러왔습니다</h2><p>{e}</p>"
+            "<p>스크리너를 아직 안 돌렸거나 올리기가 실패했을 수 있습니다.</p></body>",
+            status_code=503)
+    with _cache_lock:
+        _report_cache["html"] = html
+        _report_cache["ts"] = time.time()
+    return html
+
 
 @app.get("/", response_class=HTMLResponse)
 def get_dashboard_html():
