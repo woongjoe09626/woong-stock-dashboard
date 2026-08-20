@@ -111,7 +111,7 @@ class AddItem(BaseModel):
     owner: str
     code: str
     buy_price: float
-    qty: int
+    qty: float          # 소수점 매수를 받는다 (0.5주 같은 것)
     note: str = ""
 
 
@@ -126,7 +126,7 @@ class EditItem(BaseModel):
     owner: str | None = None
     code: str | None = None
     buy_price: float | None = None
-    qty: int | None = None
+    qty: float | None = None
     note: str | None = None
 
 
@@ -664,6 +664,11 @@ function switchTab(el, panelId) {
 }
 
 const fmt  = n => Math.round(n).toLocaleString();
+/* 수량은 소수점 매수가 가능하다. 37주는 '37주'로, 0.5주는 '0.5주'로 보여준다
+   (정수까지 '37.0000주'로 쓰면 눈이 피곤하다) */
+const fmtQty = n => Number.isInteger(n)
+    ? n.toLocaleString()
+    : n.toLocaleString(undefined, {maximumFractionDigits: 6});
 const sign = n => n > 0 ? '+' : '';
 const cls  = n => n > 0 ? 'up' : (n < 0 ? 'down' : '');
 
@@ -735,8 +740,13 @@ function renderOwner(owner, prefix) {
         else               { usb += s.buy_amount_raw; use_+= s.eval_amount_raw; }
     });
 
-    document.getElementById(prefix + '-kr-body').innerHTML = stocks.filter(s=>s.type==='KR').map(s=>makeRow(s,kre)).join('');
-    document.getElementById(prefix + '-us-body').innerHTML = stocks.filter(s=>s.type==='US').map(s=>makeRow(s,use_)).join('');
+    /* 비중 큰 것부터 위로. 비중은 평가금액의 비율이라 평가금액 순이 곧 비중 순이다.
+       예전에는 장부에 넣은 순서 그대로라 뒤죽박죽이었다. */
+    const byWeight = (a, b) => b.eval_amount_raw - a.eval_amount_raw;
+    document.getElementById(prefix + '-kr-body').innerHTML =
+        stocks.filter(s=>s.type==='KR').sort(byWeight).map(s=>makeRow(s,kre)).join('');
+    document.getElementById(prefix + '-us-body').innerHTML =
+        stocks.filter(s=>s.type==='US').sort(byWeight).map(s=>makeRow(s,use_)).join('');
 
     const ownerRet = ob > 0 ? (oe - ob) / ob * 100 : 0;
     setText(prefix + '-total-eval', fmt(oe) + '원');
@@ -785,7 +795,7 @@ function makeRow(s, groupEval) {
             <div class="memo ${noteText ? '' : 'empty'}" onclick="editNote('${s.id}')"
                  title="눌러서 메모 쓰기">${noteText ? esc(noteText) : '＋ 메모'}</div>
         </td>
-        <td data-label="보유수량" style="font-weight:600">${s.qty.toLocaleString()}주 ${pencil('qty','보유수량',s.qty)}</td>
+        <td data-label="보유수량" style="font-weight:600">${fmtQty(s.qty)}주 ${pencil('qty','보유수량',s.qty)}</td>
         <td data-label="비중" style="color:var(--muted)">${w}%</td>
         <td data-label="매입단가">${s.buy_price} ${pencil('buy_price','매입단가',String(s.buy_price).replace(/[원$,]/g,''))}</td>
         <td data-label="현재가"><strong>${s.current_price}</strong></td>
@@ -837,7 +847,7 @@ function editField(id, field, label, current) {
     if (v === null) return;
     const num = parseFloat(String(v).replace(/[,원$\\s]/g, ''));
     if (isNaN(num)) return alert('숫자만 입력해주세요.');
-    save({id, [field]: field === 'qty' ? Math.round(num) : num});
+    save({id, [field]: num});
 }
 
 /* 메모 — 매수·매도 시나리오를 적어두는 자리.
@@ -874,7 +884,7 @@ function addStock() {
     const p = prompt('매입단가 (원화 또는 달러 숫자만):','100');          if(!p) return;
     const q = prompt('보유수량:','10');                                    if(!q) return;
     const buy = parseFloat(String(p).replace(/[,원$\\s]/g,''));
-    const qty = parseInt(String(q).replace(/[,주\\s]/g,''));
+    const qty = parseFloat(String(q).replace(/[,주\\s]/g,''));
     if (isNaN(buy) || isNaN(qty)) return alert('단가와 수량은 숫자로 입력해주세요.');
     fetch('/api/add', {
         method:'POST', headers:{'Content-Type':'application/json'},
