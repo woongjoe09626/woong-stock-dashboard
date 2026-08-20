@@ -1,2 +1,6 @@
 __pycache__/
 *.pyc
+*.log
+r.json
+p.html
+rr.html
