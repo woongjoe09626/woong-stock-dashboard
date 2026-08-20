@@ -1,0 +1,968 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>스크리너</title>
+<!--
+  한국장·미국장이 함께 쓰는 리포트 템플릿.
+  시장마다 다른 건 {"title": "US 스크리너", "brand": "US 스크리너", "currency": "$", "indices": [{"key": "sp500", "label": "S&P500"}, {"key": "nasdaq", "label": "NASDAQ"}], "theme": {"accent": "#e5a54a", "glow": "#2a1f0e"}, "chartUrl": "https://finance.yahoo.com/quote/"} 한 덩어리(제목·색·통화·지수 이름)뿐이고
+  나머지 표·탭·점수 카드는 완전히 같다. 예전엔 이 500줄이 두 벌 있었다.
+-->
+<meta name="description" content="투자 전략 스크리닝 결과">
+<script>
+const MARKET = {"title": "US 스크리너", "brand": "US 스크리너", "currency": "$", "indices": [{"key": "sp500", "label": "S&P500"}, {"key": "nasdaq", "label": "NASDAQ"}], "theme": {"accent": "#e5a54a", "glow": "#2a1f0e"}, "chartUrl": "https://finance.yahoo.com/quote/"};
+document.title = MARKET.title;
+/* 파비콘도 시장 강조색으로 — 폰에서 탭 여러 개 띄웠을 때 한국장/미국장 구분이 된다 */
+{
+  const c = encodeURIComponent(MARKET.theme.accent);
+  const link = document.createElement("link");
+  link.rel = "icon";
+  link.href = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E"
+            + "%3Crect width='32' height='32' rx='7' fill='%230f1117'/%3E"
+            + "%3Cpath d='M6 21 L13 13 L18 17 L26 8' stroke='" + c
+            + "' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E";
+  document.head.appendChild(link);
+}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg-0: #0b0c11;
+    --bg-1: #14161d;
+    --bg-2: #1b1e28;
+    --line: rgba(255,255,255,0.07);
+    --ink: #eef0f4;
+    --ink-dim: #9296a3;
+    --ink-faint: #565b68;
+    /* 손익 표시 — 한국 관행(상승=빨강). 색약 검사(protan/tritan)를 통과한 조합. */
+    --up: #ff5d6c;
+    --down: #4a9dff;
+    /* 그림자는 검정이 아니라 배경 색조를 띠게 — 검정 그림자는 화면에서 붕 떠 보인다.
+       한 겹이 아니라 세 겹으로 나눠서 빛이 퍼지는 느낌을 낸다 (딱딱한 그림자는 싸구려로 보인다) */
+    --shadow: 0 1px 2px rgba(4,6,12,0.4), 0 6px 16px rgba(4,6,12,0.35),
+              0 18px 44px rgba(4,6,12,0.28);
+
+    /* 카드 안쪽 위 모서리에 1px 하이라이트 — 유리판에 빛이 걸린 것처럼 보이게 하는 핵심 */
+    --sheen: inset 0 1px 0 rgba(255,255,255,0.08);
+
+    /* 모서리 곡률 — 바깥 껍데기와 안쪽 알맹이의 곡률을 동심원으로 맞춘다 */
+    --r-shell: 22px;
+    --r-core: 16px;   /* = r-shell - 껍데기 여백(6px) */
+    --r-pill: 999px;
+
+    /* 움직임 — 기본 ease는 기계적으로 느껴진다. 무게가 실린 곡선을 쓴다 */
+    --ease: cubic-bezier(0.32, 0.72, 0, 1);
+
+    /* --accent / --accent-soft / --glow 는 시장 테마라 아래 스크립트가 채운다 */
+  }
+  * { box-sizing: border-box; }
+
+  /* ---------- 이중 테두리(껍데기 + 알맹이) ----------
+     카드를 배경에 그냥 얹지 않고, 얇은 껍데기 안에 알맹이를 앉힌다.
+     금속 트레이에 유리판이 놓인 것처럼 보이게 하는 방법이고, 이 리포트에서
+     '고급스럽다'는 인상의 대부분이 여기서 나온다. */
+  .shell {
+    background: rgba(255,255,255,0.028);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: var(--r-shell);
+    padding: 6px;
+    box-shadow: var(--shadow);
+  }
+  .shell > .core {
+    background: var(--bg-1);
+    border: 1px solid rgba(255,255,255,0.05);
+    border-radius: var(--r-core);
+    box-shadow: var(--sheen);
+    overflow: hidden;
+  }
+  html { scroll-behavior: smooth; }
+  html, body {
+    background: radial-gradient(ellipse 1100px 520px at 15% -12%, var(--glow) 0%, transparent 62%),
+                var(--bg-0);
+    margin: 0; min-height: 100dvh;
+  }
+  body {
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont,
+                 "Apple SD Gothic Neo", "Malgun Gothic", "Segoe UI", sans-serif;
+    color: var(--ink); padding: 28px 32px 60px; font-size: 14px;
+    /* 숫자가 세로로 줄맞춤되게 — 비율폭 숫자는 표와 카드에서 들쭉날쭉해 보인다 */
+    font-variant-numeric: tabular-nums;
+    -webkit-font-smoothing: antialiased;
+  }
+  /* 미세한 노이즈 한 겹 — 완전히 평평한 화면은 밋밋해 보인다 */
+  body::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+    opacity: 0.022;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+  body > * { position: relative; z-index: 1; }
+  .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+
+  /* ---------- 헤더 ---------- */
+  .header { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; flex-wrap: wrap; }
+  .brand {
+    font-weight: 800; font-size: 17px; letter-spacing: -0.01em;
+    color: var(--accent);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .live-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
+    box-shadow: 0 0 10px var(--accent); animation: pulse 1.8s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100%{opacity:1; transform:scale(1);} 50%{opacity:0.4; transform:scale(0.8);} }
+  .stat-pills { display: flex; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+  .stat-pill {
+    font-family: 'JetBrains Mono', monospace; background: var(--bg-1); border: 1px solid var(--line);
+    border-radius: 999px; padding: 6px 14px; color: var(--ink-dim);
+  }
+  .stat-pill b { color: var(--ink); font-weight: 600; }
+  .idx-up { color: var(--up); font-weight: 700; }
+  .idx-down { color: var(--down); font-weight: 700; }
+
+  .regime-banner {
+    border-radius: 16px; padding: 14px 20px; margin-bottom: 24px;
+    display: flex; align-items: center; gap: 12px; font-size: 13.5px;
+    border: 1px solid var(--line);
+  }
+  .regime-bull { background: linear-gradient(90deg, rgba(255,93,108,0.12), transparent); }
+  .regime-bear { background: linear-gradient(90deg, rgba(74,157,255,0.12), transparent); }
+  .regime-unknown { background: var(--bg-1); color: var(--ink-dim); }
+  .regime-icon { font-size: 18px; }
+
+  /* ---------- 탭 그룹 ---------- */
+  /* 구역 이름은 아주 작은 알약 배지로 — 제목처럼 크게 쓰면 정작 데이터보다 눈에 띈다 */
+  .group-label {
+    display: inline-flex; align-items: center;
+    font-size: 10px; color: var(--ink-dim); letter-spacing: 0.16em; text-transform: uppercase;
+    font-weight: 600; margin: 0 0 11px;
+    padding: 5px 11px; border-radius: var(--r-pill);
+    background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.06);
+    box-shadow: var(--sheen);
+  }
+  .tab-group + .tab-group { margin-top: 20px; }
+  .panel-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  /* 탭은 진짜 <button>이다. 예전엔 클릭만 되는 <div>라 키보드로는 아예 쓸 수 없었다. */
+  .panel-btn {
+    font: inherit; font-size: 13px; font-weight: 500; color: var(--ink-dim);
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.07); border-radius: var(--r-pill);
+    padding: 9px 16px; cursor: pointer; white-space: nowrap;
+    box-shadow: var(--sheen);
+    transition: background 0.4s var(--ease), color 0.4s var(--ease),
+                transform 0.35s var(--ease), box-shadow 0.4s var(--ease);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .panel-btn:hover {
+    background: rgba(255,255,255,0.08); color: var(--ink); transform: translateY(-1.5px);
+  }
+  /* 눌렀을 때 살짝 들어가는 느낌 — 없으면 클릭이 먹었는지 알기 어렵다 */
+  .panel-btn:active { transform: translateY(0) scale(0.97); transition-duration: 0.09s; }
+  .panel-btn:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px; color: var(--ink);
+  }
+  .panel-btn.active {
+    color: #0b0c11; font-weight: 700; background: var(--accent); border-color: transparent;
+    box-shadow: 0 4px 14px var(--accent-soft);
+  }
+  /* 역추세(BNF)는 성격이 반대라 색도 반대로 — 떨어진 걸 산다는 뜻의 파랑 */
+  .panel-btn.counter { color: var(--down); }
+  .panel-btn.counter.active {
+    background: var(--down); color: #06101c; box-shadow: 0 4px 14px rgba(74,157,255,0.3);
+  }
+  .panel-btn .n {
+    font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--ink-faint);
+    background: rgba(255,255,255,0.06); padding: 1px 7px; border-radius: 999px;
+  }
+  .panel-btn.active .n { color: rgba(0,0,0,0.55); background: rgba(0,0,0,0.12); }
+
+  /* ---------- 정보 카드 ---------- */
+  .info-card { margin: 24px 0 0; }
+  .info-row { display: flex; padding: 15px 18px; gap: 14px; align-items: flex-start; }
+  .info-row + .info-row { border-top: 1px solid rgba(255,255,255,0.05); }
+  .info-icon {
+    width: 30px; height: 30px; border-radius: 10px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center; font-size: 15px;
+    background: rgba(255,255,255,0.05); box-shadow: var(--sheen);
+  }
+  .info-icon.person { background: var(--accent-soft); }
+  .info-icon.logic { background: rgba(255,93,108,0.14); }
+  .info-text { font-size: 12.5px; color: var(--ink-dim); line-height: 1.75; padding-top: 4px; }
+  .info-text b { color: var(--ink); font-weight: 700; }
+
+  /* ---------- 테이블 카드 ---------- */
+  .table-card { margin: 16px 0 0; }
+  table { width: 100%; border-collapse: collapse; }
+  th {
+    font-size: 10.5px; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.06em;
+    text-align: right; padding: 14px 16px 10px; font-weight: 600;
+  }
+  th:first-child, td:first-child { text-align: left; }
+  td { padding: 13px 16px; border-top: 1px solid var(--line); text-align: right; vertical-align: top; font-size: 13.5px; }
+  tbody tr { transition: background 0.12s; }
+  tbody tr:hover { background: var(--bg-2); }
+  .ticker-name { font-weight: 600; }
+  /* 무슨 회사인지 한 줄. 종목명보다 흐리게 둬서 표를 읽는 흐름을 방해하지 않게 한다 */
+  .company {
+    margin-top: 4px; max-width: 34ch; font-size: 11px; line-height: 1.45;
+    color: var(--ink-faint); font-weight: 400; white-space: normal; word-break: keep-all;
+  }
+  .top-card .company { max-width: none; margin-top: 6px; font-size: 11.5px; }
+  .ticker-code { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: var(--ink-faint); }
+  .px { font-family: 'JetBrains Mono', monospace; color: var(--up); font-weight: 700; }
+  .stop { font-family: 'JetBrains Mono', monospace; color: var(--ink-dim); }
+  .volx {
+    font-family: 'JetBrains Mono', monospace; color: #1a1200; font-weight: 700; font-size: 12px;
+    background: var(--accent); padding: 3px 9px; border-radius: 999px; display: inline-block;
+  }
+  /* 추세 건강도 — 숫자 뒤에 게이지를 깔아서 "80이 좋은 건가?"를 매번 생각하지 않게 한다 */
+  .health {
+    position: relative; display: inline-block; min-width: 46px; text-align: right;
+    font-weight: 700; font-size: 12.5px; padding: 3px 9px; border-radius: 7px;
+    background: linear-gradient(90deg, var(--accent-soft) var(--h, 0%), rgba(255,255,255,0.05) var(--h, 0%));
+    box-shadow: var(--sheen);
+  }
+  .rationale { text-align: left; color: var(--ink-dim); font-size: 12px; line-height: 1.55; }
+  .match-pill {
+    display: inline-block; margin: 3px 6px 3px 0; padding: 6px 12px;
+    background: var(--bg-2); border-radius: 12px; font-size: 11.5px; text-align: left;
+    border: 1px solid var(--line);
+  }
+  .match-pill b { color: var(--accent); }
+  .match-pill .ticker-code { display: block; margin-top: 3px; }
+  .match-n {
+    font-family: 'JetBrains Mono', monospace; font-weight: 800; color: #0b0c11;
+    background: var(--accent); padding: 3px 11px; border-radius: 999px; display: inline-block; font-size: 12px;
+  }
+  .empty-state {
+    padding: 60px 20px; text-align: center; color: var(--ink-faint); font-size: 13px;
+  }
+
+  /* ---------- 종목을 누르면 펼쳐지는 미니 차트 ---------- */
+  tbody tr.has-chart { cursor: pointer; }
+  tbody tr.has-chart td:first-child .ticker-name::after {
+    content: "▾"; font-size: 9px; color: var(--ink-faint); margin-left: 6px;
+    display: inline-block; transition: transform 0.18s ease;
+  }
+  tbody tr.has-chart.open td:first-child .ticker-name::after { transform: rotate(180deg); }
+  tbody tr.has-chart:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  tr.chart-row > td { padding: 0 16px 18px; border-top: none; }
+  .chart-box {
+    background: var(--bg-0); border: 1px solid var(--line); border-radius: 14px;
+    padding: 14px 14px 8px;
+    /* 표가 가로로 스크롤돼도 차트는 화면 왼쪽에 고정 (폭은 JS가 보이는 크기로 맞춘다) */
+    position: sticky; left: 0;
+  }
+  .chart-box svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .chart-legend {
+    display: flex; gap: 14px; flex-wrap: wrap; font-size: 10.5px; color: var(--ink-dim);
+    margin-top: 8px; padding-left: 2px;
+  }
+  .chart-legend i { display: inline-block; width: 14px; height: 0; margin-right: 5px;
+                    vertical-align: middle; border-top-width: 2px; border-top-style: solid; }
+  /* 화살표를 글자 옆에 벌거벗겨 두지 않고 동그란 자리에 앉힌다 (누를 곳이 명확해진다) */
+  .chart-open-link {
+    display: inline-flex; align-items: center; gap: 7px; margin-left: auto;
+    font-size: 10.5px; color: var(--ink-dim); text-decoration: none;
+    padding: 4px 4px 4px 12px; border-radius: var(--r-pill);
+    background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.06);
+    transition: background 0.4s var(--ease), color 0.4s var(--ease);
+  }
+  .chart-open-link .go {
+    width: 19px; height: 19px; border-radius: 50%; font-size: 9.5px;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: rgba(255,255,255,0.08);
+    transition: transform 0.4s var(--ease), background 0.4s var(--ease);
+  }
+  .chart-open-link:hover { color: var(--ink); background: rgba(255,255,255,0.08); }
+  .chart-open-link:hover .go {
+    transform: translate(1.5px, -1.5px) scale(1.08); background: var(--accent-soft);
+  }
+  .chart-open-link:active { transform: scale(0.97); }
+  .c-lbl { fill: var(--ink-faint); font-size: 9px; }
+  .c-tag { font-size: 9px; font-weight: 700; }
+  /* ---------- 오늘의 TOP 후보 ---------- */
+  .top-section { margin-bottom: 30px; }
+  .top-head {
+    display: flex; align-items: baseline; gap: 12px; margin: 6px 2px 14px; flex-wrap: wrap;
+  }
+  .top-title { font-size: 19px; font-weight: 800; letter-spacing: -0.03em; margin: 0; }
+  .top-sub { font-size: 11.5px; color: var(--ink-faint); }
+
+  /* 벤토 배치 — 1등 카드가 두 칸을 차지한다. 다섯 개를 똑같은 크기로 늘어놓으면
+     "이 중에 뭘 먼저 보라는 건지"가 사라진다. 크기 자체가 순위를 말하게 한다. */
+  .top-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .top-card { grid-column: span 2; }
+  .top-card.rank1 { grid-column: span 4; }
+  @media (min-width: 1180px) {
+    .top-grid { grid-template-columns: repeat(6, 1fr); }
+    .top-card { grid-column: span 2; }
+    .top-card.rank1 { grid-column: span 6; }
+  }
+
+  .top-card {
+    background: var(--bg-1);
+    border: 1px solid rgba(255,255,255,0.055);
+    border-radius: var(--r-core);
+    padding: 16px 18px; position: relative; overflow: hidden;
+    box-shadow: var(--shadow), var(--sheen);
+    transition: transform 0.5s var(--ease), border-color 0.5s var(--ease);
+  }
+  .top-card:hover { transform: translateY(-2px); border-color: rgba(255,255,255,0.11); }
+  .top-card::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--accent);
+  }
+  /* 1등은 색을 하나 더 쓰는 대신 띠를 굵게 + 은은한 후광으로 구분한다 */
+  .top-card.rank1::before { width: 5px; }
+  .top-card.rank1 {
+    padding: 20px 22px;
+    background:
+      radial-gradient(420px 180px at 0% 0%, var(--accent-soft), transparent 70%),
+      var(--bg-1);
+  }
+  .top-card.rank1 .top-name { font-size: 20px; letter-spacing: -0.02em; }
+  .top-card.rank1 .top-score b { font-size: 30px; }
+  .top-card.rank1 .top-metrics { grid-template-columns: repeat(4, 1fr); }
+  .top-rank {
+    font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--ink-faint);
+    letter-spacing: 0.18em;
+  }
+  /* 점수는 카드 오른쪽 위에 겹쳐 놓기 때문에, 이름 쪽에 그만큼 자리를 비워둬야 한다.
+     안 그러면 긴 종목명이 점수 위로 올라탄다 (Central Garden & Pet Company 같은 이름) */
+  .top-rank, .top-name, .top-code { padding-right: 84px; }
+  .top-card.rank1 .top-name, .top-card.rank1 .top-rank,
+  .top-card.rank1 .top-code { padding-right: 104px; }
+  .top-name { font-weight: 700; font-size: 15px; margin-top: 3px; letter-spacing: -0.01em; }
+  .top-code { font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: var(--ink-faint); }
+  .top-score {
+    position: absolute; right: 15px; top: 13px; text-align: right;
+  }
+  .top-score b {
+    font-family: 'JetBrains Mono', monospace; font-size: 21px; font-weight: 800;
+    color: var(--accent);
+  }
+  .top-score span { display: block; font-size: 9.5px; color: var(--ink-faint); letter-spacing: 0.1em; }
+  .top-metrics {
+    display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px 14px;
+    margin: 13px 0 0; font-size: 11.5px;
+  }
+  .top-metrics div { display: flex; justify-content: space-between; gap: 8px; }
+  .top-metrics dt { color: var(--ink-faint); }
+  .top-metrics dd {
+    margin: 0; font-family: 'JetBrains Mono', monospace; color: var(--ink); font-weight: 600;
+  }
+  .top-strat {
+    margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--line);
+    font-size: 11.5px; color: var(--ink-dim); line-height: 1.6;
+  }
+  .top-strat b { color: var(--accent); }
+  .top-sector {
+    display: inline-block; font-size: 10.5px; color: var(--ink-dim); background: var(--bg-2);
+    border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px; margin-top: 8px;
+  }
+  .top-warn {
+    margin-top: 9px; font-size: 11px; color: var(--accent); line-height: 1.6;
+  }
+  .filter-note {
+    margin: 12px 2px 0; font-size: 11.5px; color: var(--ink-faint); line-height: 1.7;
+  }
+
+  /* ---------- 👀 팔로우 중 ---------- */
+  .follow-section { margin: 0 0 26px; }
+  .follow-head {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 14px 16px 10px;
+  }
+  .follow-section .scroll-x { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .follow-section table { min-width: 660px; }
+  /* 표는 어차피 가로로 스크롤되므로 머리글은 한 줄로 둔다 — '보/유', '고점대/비'처럼
+     두 글자가 쪼개지면 읽는 데 더 걸린다 */
+  .follow-section th, .follow-section td:not(:first-child):not(:last-child) {
+    white-space: nowrap;
+  }
+  .gain { color: var(--up); font-weight: 700; }
+  .loss { color: var(--down); font-weight: 700; }
+  /* 손절선을 깬 줄은 확실히 눈에 띄어야 한다 — 이걸 놓치면 도구를 만든 의미가 없다 */
+  tr.broke-stop { background: rgba(74,157,255,0.10); box-shadow: inset 3px 0 0 var(--down); }
+
+  /* ---------- 폰에서 보기 ----------
+     리포트 파일을 카톡·메일로 자기한테 보내서 폰으로 열어보는 용도.
+     화면이 좁아지면 여백을 줄이고, 표는 가로로만 스크롤되게 한다
+     (표 때문에 페이지 전체가 좌우로 흔들리면 읽기가 아주 불편해진다). */
+  .table-card > .core { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .table-card table { min-width: 560px; }
+
+  @media (max-width: 640px) {
+    body { padding: 18px 13px 44px; font-size: 13px; }
+    .header { gap: 10px; margin-bottom: 14px; }
+    .brand { font-size: 15px; }
+    .stat-pills { font-size: 11px; }
+    .stat-pill { padding: 5px 11px; }
+    .regime-banner { padding: 13px 15px; font-size: 12.5px; margin-bottom: 20px; }
+    .panel-btn { font-size: 12px; padding: 8px 13px; }
+    :root { --r-shell: 18px; --r-core: 13px; }
+
+    /* TOP 카드 — 폰에서는 벤토 배치를 풀고 한 줄에 하나씩 (겹치면 누르기 어렵다) */
+    .top-grid { grid-template-columns: 1fr; gap: 10px; }
+    .top-card, .top-card.rank1 { grid-column: span 1; padding: 15px 16px; }
+    .top-name { font-size: 15px; }
+    .top-card.rank1 .top-name { font-size: 17px; }
+    .top-score b, .top-card.rank1 .top-score b { font-size: 21px; }
+    /* 지표는 폰에서 무조건 2열 — 4열로 두면 '현재가'가 '현/재/가'로 쪼개진다 */
+    .top-metrics, .top-card.rank1 .top-metrics {
+      grid-template-columns: repeat(2, 1fr); font-size: 11px; gap: 5px 10px;
+    }
+    .top-rank, .top-name, .top-code,
+    .top-card.rank1 .top-rank, .top-card.rank1 .top-name,
+    .top-card.rank1 .top-code { padding-right: 72px; }
+
+    th { font-size: 10px; padding: 11px 10px 8px; }
+    td { padding: 11px 10px; font-size: 12.5px; }
+    .rationale { font-size: 11.5px; }
+    .info-text { font-size: 12px; }
+  }
+
+  /* ---------- 등장 연출 ----------
+     화면에 들어올 때 아래에서 떠오르며 초점이 맞는다. 스크롤 이벤트가 아니라
+     IntersectionObserver로 처리한다 (스크롤 이벤트는 폰에서 프레임을 잡아먹는다).
+     움직이는 건 transform/opacity/filter뿐이라 레이아웃을 다시 계산하지 않는다. */
+  @media (prefers-reduced-motion: no-preference) {
+    .reveal {
+      opacity: 0; transform: translateY(18px); filter: blur(6px);
+      transition: opacity 0.75s var(--ease), transform 0.75s var(--ease), filter 0.75s var(--ease);
+      transition-delay: var(--d, 0s);
+    }
+    .reveal.shown { opacity: 1; transform: none; filter: none; }
+  }
+</style>
+<script>
+/* 시장 테마 색을 CSS 변수로 주입. <body> 이전에 실행돼야 색이 한 번 깜빡이지 않는다. */
+{
+  const t = MARKET.theme, r = document.documentElement.style;
+  r.setProperty("--accent", t.accent);
+  // 강조색을 옅게 깐 배경/그림자용 — 색상값 하나에서 파생시켜 손으로 관리할 색을 늘리지 않는다
+  r.setProperty("--accent-soft", t.accent + "2e");
+  r.setProperty("--glow", t.glow);
+}
+</script>
+</head>
+<body>
+  <header class="header">
+    <div class="brand"><span class="live-dot"></span><span id="brandName"></span></div>
+    <div class="stat-pills mono" id="statPills"></div>
+  </header>
+
+  <div id="regimeBanner"></div>
+
+  <main>
+  <section class="top-section reveal" id="topSection" style="display:none;">
+    <div class="top-head">
+      <h2 class="top-title">⭐ 오늘의 TOP 후보</h2>
+      <span class="top-sub" id="topSub"></span>
+    </div>
+    <div class="top-grid" id="topGrid"></div>
+    <p class="filter-note" id="filterNote"></p>
+  </section>
+
+  <!-- 👀 팔로우 중 — watch.py로 편입해둔 종목. 없으면 통째로 숨긴다 -->
+  <section class="follow-section shell reveal" id="followSection" style="display:none;">
+    <div class="core">
+      <div class="follow-head">
+        <span class="group-label" style="margin:0;">👀 팔로우 중</span>
+        <span class="top-sub" id="followSub"></span>
+      </div>
+      <div class="scroll-x">
+        <table>
+          <thead><tr>
+            <th>종목</th><th>편입일</th><th>보유</th><th>편입가</th>
+            <th>현재가</th><th>수익률</th><th>고점대비</th><th style="text-align:left;">비고</th>
+          </tr></thead>
+          <tbody id="followBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <nav class="tabs-area reveal" aria-label="전략 선택">
+    <div class="tab-group">
+      <div class="group-label">⚡ 추세를 따라간다</div>
+      <div class="panel-row" id="tabsTrend"></div>
+    </div>
+
+    <div class="tab-group">
+      <div class="group-label">🔄 추세를 거스른다 · 별도 판단</div>
+      <div class="panel-row" id="tabsCounter"></div>
+    </div>
+
+    <!-- S&P500 편입 워치는 미국장에만 있다 (한국장에서는 숨겨진다) -->
+    <div class="tab-group" id="spWatchSection" style="display:none;">
+      <div class="group-label">🎯 S&P500 편입 워치</div>
+      <div class="panel-row" id="tabsSpWatch"></div>
+    </div>
+  </nav>
+
+  <div class="info-card shell reveal" id="infoCard" style="display:none;">
+    <div class="core">
+      <div class="info-row">
+        <div class="info-icon person">👤</div>
+        <div class="info-text" id="infoBio"></div>
+      </div>
+      <div class="info-row">
+        <div class="info-icon logic">🧠</div>
+        <div class="info-text" id="infoExplain"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="table-card shell reveal">
+    <div class="core">
+      <table>
+        <thead id="thead"></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+      <div class="empty-state" id="empty" style="display:none;"></div>
+    </div>
+  </div>
+  </main>
+
+<script>
+const DATA = {"run_date": "2026-08-21 06:30", "total_scanned": 1506, "universe_size": 1520, "illiquid_excluded": 14, "gap_excluded": 0, "wide_stop_excluded": 1, "suppressed_strategies": [], "strategies": [{"id": "breakout", "label": "돌파", "desc": "조여진 베이스를 거래량과 함께 신고가권에서 돌파", "category": "timing", "bio": "니콜라스 다바스(박스 이론) · 제시 리버모어(피벗 포인트) · 마크 미너비니(변동성 수축) · 퀄라마지(깃발 돌파)가 각자 다른 이름으로 부른 같은 그림을 하나로 합친 전략. 네 사람 모두 '크게 오른 뒤 좁게 눌린 자리가 거래량과 함께 뚫릴 때'를 진입 지점으로 봤다.", "explanation": "장기 추세가 정배열(50일선>150일선>200일선)인 종목이, 최근에 이미 한 번 크게 오른 뒤 좁은 범위로 눌리며 변동성이 줄어든 상태에서, 52주 신고가 근처에서 거래량을 동반해 그 범위를 뚫으면 매수 신호로 봅니다. 손절은 눌림 구간 저점 바로 아래라 폭이 작고, 그만큼 틀렸을 때 손실이 작습니다. 신고가권 돌파는 학술 연구에서도 오래 살아남은 몇 안 되는 이례현상입니다.", "results": []}, {"id": "dip", "label": "눌림목", "desc": "상승추세 중 거래량 마른 조정 후 반등 시작 (단계별 운용)", "category": "timing", "bio": "키움 영웅전 우승자 '방배동선수'의 눌림목 매매와, 사용자가 직접 설계한 박스 눌림목(절반 익절 후 재진입) 운용법을 하나로 합친 전략. 돌파를 추격하지 않고 한 번 쉬는 자리에서만 산다는 점이 핵심이다.", "explanation": "상승 추세(50일선>200일선, 200일선 상승 중)가 살아있는 종목이 최근 고점에서 얕게 조정받고, 그 구간에서 거래량이 줄어(매도 압력 소진) 50일선 위에서 버틴 뒤, 오늘 양봉으로 전일 고가를 회복하면 매수 신호로 봅니다. 한 번에 다 팔지 않고 최근 고점에서 절반만 익절한 뒤, 되돌아오면 다시 채우고 돌파하면 나머지를 추세추종으로 끌고 갑니다. 돌파 추격이 아니라 눌림목이라 미리 예약주문을 걸어둘 수 있습니다.", "results": [{"close": 116.56999969482422, "stop_loss": 106.29589936308328, "volume_ratio": null, "risk_reward": 0.89, "detail": "고점 대비 -7.3% 조정 후 반등 · 조정 중 거래량 0.66배로 감소 · 50일선 지지", "box_top": 125.75, "box_low": 102.81, "exit_rule": "① 고점 125.75 도달 → 절반 익절  ② 되돌아오면 재매수(최대 2회)  ③ 종가 돌파 → 나머지는 20일선 이탈까지", "ticker": "BG", "name": "Bunge Global", "trend_health": 52.1, "trend_health_desc": "보통 — 추세가 뚜렷하지 않음"}, {"close": 28.174999237060547, "stop_loss": 24.65898442014863, "volume_ratio": null, "risk_reward": 0.44, "detail": "고점 대비 -5.3% 조정 후 반등 · 조정 중 거래량 0.75배로 감소 · 50일선 지지", "box_top": 29.7389, "box_low": 24.97, "exit_rule": "① 고점 29.74 도달 → 절반 익절  ② 되돌아오면 재매수(최대 2회)  ③ 종가 돌파 → 나머지는 20일선 이탈까지", "ticker": "GEN", "name": "Gen Digital", "trend_health": 64.3, "trend_health_desc": "건강 — 추세가 살아있음"}, {"close": 86.1500015258789, "stop_loss": 78.77250289916992, "volume_ratio": null, "risk_reward": 0.77, "detail": "고점 대비 -6.2% 조정 후 반등 · 조정 중 거래량 0.59배로 감소 · 50일선 지지", "box_top": 91.85, "box_low": 74.8, "exit_rule": "① 고점 91.85 도달 → 절반 익절  ② 되돌아오면 재매수(최대 2회)  ③ 종가 돌파 → 나머지는 20일선 이탈까지", "ticker": "GM", "name": "General Motors", "trend_health": 88.3, "trend_health_desc": "매우 건강 — 정배열에 신고가권"}, {"close": 92.68000030517578, "stop_loss": 85.1815982055664, "volume_ratio": null, "risk_reward": 1.19, "detail": "고점 대비 -8.8% 조정 후 반등 · 조정 중 거래량 0.69배로 감소 · 50일선 지지", "box_top": 101.6, "box_low": 86.92, "exit_rule": "① 고점 101.60 도달 → 절반 익절  ② 되돌아오면 재매수(최대 2회)  ③ 종가 돌파 → 나머지는 20일선 이탈까지", "ticker": "VTR", "name": "Ventas", "trend_health": 85.0, "trend_health_desc": "매우 건강 — 정배열에 신고가권"}, {"close": 237.39999389648438, "stop_loss": 220.64906768592425, "volume_ratio": null, "risk_reward": 1.06, "detail": "고점 대비 -7.0% 조정 후 반등 · 조정 중 거래량 0.80배로 감소 · 50일선 지지", "box_top": 255.2, "box_low": 224.7017, "exit_rule": "① 고점 255.20 도달 → 절반 익절  ② 되돌아오면 재매수(최대 2회)  ③ 종가 돌파 → 나머지는 20일선 이탈까지", "ticker": "WELL", "name": "Welltower", "trend_health": 87.1, "trend_health_desc": "매우 건강 — 정배열에 신고가권"}, {"close": 612.6400146484375, "stop_loss": 553.9637298583984, "volume_ratio": null, "risk_reward": 1.11, "detail": "고점 대비 -9.6% 조정 후 반등 · 조정 중 거래량 0.53배로 감소 · 50일선 지지", "box_top": 677.9, "box_low": 514.47, "exit_rule": "① 고점 677.90 도달 → 절반 익절  ② 되돌아오면 재매수(최대 2회)  ③ 종가 돌파 → 나머지는 20일선 이탈까지", "ticker": "MEDP", "name": "Medpace", "trend_health": 65.4, "trend_health_desc": "건강 — 추세가 살아있음"}, {"close": 223.11000061035156, "stop_loss": 207.44998931884766, "volume_ratio": null, "risk_reward": 0.83, "detail": "고점 대비 -5.5% 조정 후 반등 · 조정 중 거래량 0.85배로 감소 · 50일선 지지", "box_top": 236.07, "box_low": 207.9, "exit_rule": "① 고점 236.07 도달 → 절반 익절  ② 되돌아오면 재매수(최대 2회)  ③ 종가 돌파 → 나머지는 20일선 이탈까지", "ticker": "THG", "name": "Hanover Insurance", "trend_health": 87.3, "trend_health_desc": "매우 건강 — 정배열에 신고가권"}, {"close": 25.3799991607666, "stop_loss": 23.84375, "volume_ratio": null, "risk_reward": 0.96, "detail": "고점 대비 -5.5% 조정 후 반등 · 조정 중 거래량 0.75배로 감소 · 50일선 지지", "box_top": 26.86, "box_low": 24.28, "exit_rule": "① 고점 26.86 도달 → 절반 익절  ② 되돌아오면 재매수(최대 2회)  ③ 종가 돌파 → 나머지는 20일선 이탈까지", "ticker": "FCPT", "name": "Four Corners Property Trust, Inc.", "trend_health": 72.6, "trend_health_desc": "건강 — 추세가 살아있음"}, {"close": 52.08000183105469, "stop_loss": 47.63780059814453, "volume_ratio": null, "risk_reward": 1.21, "detail": "고점 대비 -9.3% 조정 후 반등 · 조정 중 거래량 0.79배로 감소 · 50일선 지지", "box_top": 57.4499, "box_low": 48.61, "exit_rule": "① 고점 57.45 도달 → 절반 익절  ② 되돌아오면 재매수(최대 2회)  ③ 종가 돌파 → 나머지는 20일선 이탈까지", "ticker": "WLY", "name": "John Wiley & Sons", "trend_health": 89.9, "trend_health_desc": "매우 건강 — 정배열에 신고가권"}]}, {"id": "bnf", "label": "BNF 역추세", "desc": "20일선에서 크게 벌어진 급락 + 투매 후 반등 (평균회귀)", "category": "timing", "bio": "일본의 개인투자자 고테가와 다카시(小手川隆, 통칭 BNF). 2000년에 자기 돈 약 160만엔으로 시작해 8년 만에 180억엔대까지 불린 것으로 알려져 있다. 2005년 미즈호증권의 주문 실수(제이컴 사건) 때 단시간에 20억엔을 벌어 '제이컴 남자'로 유명해졌다. 남들이 오르는 걸 쫓을 때 그는 반대로 '과하게 맞은 것'을 샀고, 평균으로 되돌아오는 폭만 먹고 나왔다.", "explanation": "주가가 20일 이동평균에서 아래로 크게 벌어진(이격도) 종목 중에서, 그 하락이 급격했고 거래량이 터졌으며(투매 클라이맥스) 오늘 양봉으로 반등 조짐을 보인 종목을 찾습니다. 장기 추세가 살아있는(200일선 위) 종목만 대상으로 해서, 진짜로 무너지는 회사를 잡는 것을 피합니다. 목표는 20일선까지의 되돌림이고 거기서 전량 청산합니다. 우리 전략 중 유일하게 '떨어진 것을 사는' 방식이라, 돌파 전략들이 전부 침묵하는 급락장에서 후보를 내주는 역할을 합니다.", "results": [{"close": 33.650001525878906, "stop_loss": 32.12416770935059, "volume_ratio": 1.72, "risk_reward": 4.37, "detail": "20일선 이격 -16.5% (5일간 -19.3% 급락), 투매 거래량 1.7배", "target_ma": 40.312, "exit_rule": "20일선 40.31 도달 시 전량 청산 (평균회귀)", "ticker": "LZB", "name": "La-Z-Boy, Inc."}]}], "overlaps": [], "scored": [{"score": 78.0, "rs": 71.8, "confluence_count": 1, "trend_health": 88.3, "money_power": 0.82, "near_high_pct": 93.8, "close_strength": 0.89, "sector_signal_count": 2, "above_year_ma": true, "atr_stop_multiple": 3.5, "risk_pct": 8.56, "open_gap_pct": -0.89, "warnings": [], "ticker": "GM", "name": "General Motors", "sector": "Consumer Discretionary", "close": 86.1500015258789, "stop_loss": 78.77250289916992, "risk_reward": 0.77, "strategies": ["눌림목"], "detail": "고점 대비 -6.2% 조정 후 반등 · 조정 중 거래량 0.59배로 감소 · 50일선 지지", "trading_value": 500648245.41939354}, {"score": 75.8, "rs": 66.6, "confluence_count": 1, "trend_health": 87.1, "money_power": 0.69, "near_high_pct": 93.0, "close_strength": 0.62, "sector_signal_count": 3, "above_year_ma": true, "atr_stop_multiple": 3.5, "risk_pct": 7.06, "open_gap_pct": 0.07, "warnings": [], "ticker": "WELL", "name": "Welltower", "sector": "Real Estate", "close": 237.39999389648438, "stop_loss": 220.64906768592425, "risk_reward": 1.06, "strategies": ["눌림목"], "detail": "고점 대비 -7.0% 조정 후 반등 · 조정 중 거래량 0.80배로 감소 · 50일선 지지", "trading_value": 744699641.6149323}, {"score": 74.1, "rs": 73.5, "confluence_count": 1, "trend_health": 87.3, "money_power": 0.85, "near_high_pct": 94.5, "close_strength": 0.84, "sector_signal_count": 1, "above_year_ma": true, "atr_stop_multiple": 3.5, "risk_pct": 7.02, "open_gap_pct": -0.26, "warnings": [], "ticker": "THG", "name": "Hanover Insurance", "sector": "Financials", "close": 223.11000061035156, "stop_loss": 207.44998931884766, "risk_reward": 0.83, "strategies": ["눌림목"], "detail": "고점 대비 -5.5% 조정 후 반등 · 조정 중 거래량 0.85배로 감소 · 50일선 지지", "trading_value": 70743592.57085189}, {"score": 71.6, "rs": 89.8, "confluence_count": 1, "trend_health": 89.9, "money_power": 0.59, "near_high_pct": 90.7, "close_strength": 0.45, "sector_signal_count": 1, "above_year_ma": true, "atr_stop_multiple": 2.65, "risk_pct": 8.53, "open_gap_pct": -0.98, "warnings": [], "ticker": "WLY", "name": "John Wiley & Sons", "sector": "Communication Services", "close": 52.08000183105469, "stop_loss": 47.63780059814453, "risk_reward": 1.21, "strategies": ["눌림목"], "detail": "고점 대비 -9.3% 조정 후 반등 · 조정 중 거래량 0.79배로 감소 · 50일선 지지", "trading_value": 21094773.217675783}, {"score": 71.2, "rs": 59.2, "confluence_count": 1, "trend_health": 85.0, "money_power": 0.39, "near_high_pct": 91.2, "close_strength": 0.46, "sector_signal_count": 3, "above_year_ma": true, "atr_stop_multiple": 3.47, "risk_pct": 8.09, "open_gap_pct": 0.09, "warnings": [], "ticker": "VTR", "name": "Ventas", "sector": "Real Estate", "close": 92.68000030517578, "stop_loss": 85.1815982055664, "risk_reward": 1.19, "strategies": ["눌림목"], "detail": "고점 대비 -8.8% 조정 후 반등 · 조정 중 거래량 0.69배로 감소 · 50일선 지지", "trading_value": 330062717.0650597}, {"score": 66.8, "rs": 34.4, "confluence_count": 1, "trend_health": 72.6, "money_power": 0.57, "near_high_pct": 94.5, "close_strength": 0.67, "sector_signal_count": 3, "above_year_ma": true, "atr_stop_multiple": 3.5, "risk_pct": 6.05, "open_gap_pct": -0.28, "warnings": [], "ticker": "FCPT", "name": "Four Corners Property Trust, Inc.", "sector": "Real Estate", "close": 25.3799991607666, "stop_loss": 23.84375, "risk_reward": 0.96, "strategies": ["눌림목"], "detail": "고점 대비 -5.5% 조정 후 반등 · 조정 중 거래량 0.75배로 감소 · 50일선 지지", "trading_value": 17019122.752301313}, {"score": 65.0, "rs": 84.0, "confluence_count": 1, "trend_health": 65.4, "money_power": 0.77, "near_high_pct": 90.4, "close_strength": 0.5, "sector_signal_count": 1, "above_year_ma": true, "atr_stop_multiple": 3.5, "risk_pct": 9.58, "open_gap_pct": -1.56, "warnings": [], "ticker": "MEDP", "name": "Medpace", "sector": "Health Care", "close": 612.6400146484375, "stop_loss": 553.9637298583984, "risk_reward": 1.11, "strategies": ["눌림목"], "detail": "고점 대비 -9.6% 조정 후 반등 · 조정 중 거래량 0.53배로 감소 · 50일선 지지", "trading_value": 164628107.46549684}, {"score": 62.6, "rs": 47.6, "confluence_count": 1, "trend_health": 64.3, "money_power": 1.09, "near_high_pct": 89.7, "close_strength": 0.85, "sector_signal_count": 1, "above_year_ma": true, "atr_stop_multiple": 3.5, "risk_pct": 12.48, "open_gap_pct": -0.82, "warnings": [], "ticker": "GEN", "name": "Gen Digital", "sector": "Information Technology", "close": 28.174999237060547, "stop_loss": 24.65898442014863, "risk_reward": 0.44, "strategies": ["눌림목"], "detail": "고점 대비 -5.3% 조정 후 반등 · 조정 중 거래량 0.75배로 감소 · 50일선 지지", "trading_value": 137974880.4883705}, {"score": 52.7, "rs": 53.3, "confluence_count": 1, "trend_health": 52.1, "money_power": 0.69, "near_high_pct": 86.4, "close_strength": 0.35, "sector_signal_count": 1, "above_year_ma": true, "atr_stop_multiple": 3.5, "risk_pct": 8.81, "open_gap_pct": 0.38, "warnings": [], "ticker": "BG", "name": "Bunge Global", "sector": "Consumer Staples", "close": 116.56999969482422, "stop_loss": 106.29589936308328, "risk_reward": 0.89, "strategies": ["눌림목"], "detail": "고점 대비 -7.3% 조정 후 반등 · 조정 중 거래량 0.66배로 감소 · 50일선 지지", "trading_value": 149962175.46186295}, {"score": 42.6, "rs": 19.8, "confluence_count": 1, "trend_health": null, "money_power": 1.52, "near_high_pct": 74.9, "close_strength": 0.36, "sector_signal_count": 2, "above_year_ma": false, "atr_stop_multiple": 0.96, "risk_pct": 4.53, "open_gap_pct": -0.88, "warnings": ["⚠ 240일선 아래 — 1년 보유자 손실권, 상승 시 매물 부담", "⚠ 손절 너무 타이트 (ATR 0.96배)"], "ticker": "LZB", "name": "La-Z-Boy, Inc.", "sector": "Consumer Discretionary", "close": 33.650001525878906, "stop_loss": 32.12416770935059, "risk_reward": 4.37, "strategies": ["BNF 역추세"], "detail": "20일선 이격 -16.5% (5일간 -19.3% 급락), 투매 거래량 1.7배", "trading_value": 20450222.83300705}], "top_picks": [{"score": 78.0, "rs": 71.8, "confluence_count": 1, "trend_health": 88.3, "money_power": 0.82, "near_high_pct": 93.8, "close_strength": 0.89, "sector_signal_count": 2, "above_year_ma": true, "atr_stop_multiple": 3.5, "risk_pct": 8.56, "open_gap_pct": -0.89, "warnings": [], "ticker": "GM", "name": "General Motors", "sector": "Consumer Discretionary", "close": 86.1500015258789, "stop_loss": 78.77250289916992, "risk_reward": 0.77, "strategies": ["눌림목"], "detail": "고점 대비 -6.2% 조정 후 반등 · 조정 중 거래량 0.59배로 감소 · 50일선 지지", "trading_value": 500648245.41939354}, {"score": 75.8, "rs": 66.6, "confluence_count": 1, "trend_health": 87.1, "money_power": 0.69, "near_high_pct": 93.0, "close_strength": 0.62, "sector_signal_count": 3, "above_year_ma": true, "atr_stop_multiple": 3.5, "risk_pct": 7.06, "open_gap_pct": 0.07, "warnings": [], "ticker": "WELL", "name": "Welltower", "sector": "Real Estate", "close": 237.39999389648438, "stop_loss": 220.64906768592425, "risk_reward": 1.06, "strategies": ["눌림목"], "detail": "고점 대비 -7.0% 조정 후 반등 · 조정 중 거래량 0.80배로 감소 · 50일선 지지", "trading_value": 744699641.6149323}, {"score": 74.1, "rs": 73.5, "confluence_count": 1, "trend_health": 87.3, "money_power": 0.85, "near_high_pct": 94.5, "close_strength": 0.84, "sector_signal_count": 1, "above_year_ma": true, "atr_stop_multiple": 3.5, "risk_pct": 7.02, "open_gap_pct": -0.26, "warnings": [], "ticker": "THG", "name": "Hanover Insurance", "sector": "Financials", "close": 223.11000061035156, "stop_loss": 207.44998931884766, "risk_reward": 0.83, "strategies": ["눌림목"], "detail": "고점 대비 -5.5% 조정 후 반등 · 조정 중 거래량 0.85배로 감소 · 50일선 지지", "trading_value": 70743592.57085189}, {"score": 71.6, "rs": 89.8, "confluence_count": 1, "trend_health": 89.9, "money_power": 0.59, "near_high_pct": 90.7, "close_strength": 0.45, "sector_signal_count": 1, "above_year_ma": true, "atr_stop_multiple": 2.65, "risk_pct": 8.53, "open_gap_pct": -0.98, "warnings": [], "ticker": "WLY", "name": "John Wiley & Sons", "sector": "Communication Services", "close": 52.08000183105469, "stop_loss": 47.63780059814453, "risk_reward": 1.21, "strategies": ["눌림목"], "detail": "고점 대비 -9.3% 조정 후 반등 · 조정 중 거래량 0.79배로 감소 · 50일선 지지", "trading_value": 21094773.217675783}, {"score": 71.2, "rs": 59.2, "confluence_count": 1, "trend_health": 85.0, "money_power": 0.39, "near_high_pct": 91.2, "close_strength": 0.46, "sector_signal_count": 3, "above_year_ma": true, "atr_stop_multiple": 3.47, "risk_pct": 8.09, "open_gap_pct": 0.09, "warnings": [], "ticker": "VTR", "name": "Ventas", "sector": "Real Estate", "close": 92.68000030517578, "stop_loss": 85.1815982055664, "risk_reward": 1.19, "strategies": ["눌림목"], "detail": "고점 대비 -8.8% 조정 후 반등 · 조정 중 거래량 0.69배로 감소 · 50일선 지지", "trading_value": 330062717.0650597}], "sector_counts": {"Consumer Staples": 1, "Information Technology": 1, "Consumer Discretionary": 2, "Real Estate": 3, "Health Care": 1, "Financials": 1, "Communication Services": 1}, "market_regime": {"error": null, "sp500_bullish": true, "sp500_close": 7641.16015625, "sp500_ma200": 7091.612004394531, "nasdaq_bullish": true, "nasdaq_close": 26067.166015625, "nasdaq_ma200": 24230.114306640626, "overall_bullish": true}, "charts": {"BG": {"d": ["04/14", "04/15", "04/16", "04/17", "04/20", "04/21", "04/22", "04/23", "04/24", "04/27", "04/28", "04/29", "04/30", "05/01", "05/04", "05/05", "05/06", "05/07", "05/08", "05/11", "05/12", "05/13", "05/14", "05/15", "05/18", "05/19", "05/20", "05/21", "05/22", "05/26", "05/27", "05/28", "05/29", "06/01", "06/02", "06/03", "06/04", "06/05", "06/08", "06/09", "06/10", "06/11", "06/12", "06/15", "06/16", "06/17", "06/18", "06/22", "06/23", "06/24", "06/25", "06/26", "06/29", "06/30", "07/01", "07/02", "07/06", "07/07", "07/08", "07/09", "07/10", "07/13", "07/14", "07/15", "07/16", "07/17", "07/20", "07/21", "07/22", "07/23", "07/24", "07/27", "07/28", "07/29", "07/30", "07/31", "08/03", "08/04", "08/05", "08/06", "08/07", "08/10", "08/11", "08/12", "08/13", "08/14", "08/17", "08/18", "08/19", "08/20"], "o": [121.69, 122.28, 119.46, 119.31, 119.5, 122.85, 126.3, 125.56, 125.64, 124.49, 125.46, 121.74, 124.45, 126.24, 124.14, 127.14, 128.18, 124.53, 123.9, 124.25, 125.79, 126.62, 125.18, 122.36, 122.86, 122.43, 121.38, 120.48, 118.9, 120.02, 120.5, 121.33, 123.47, 123.95, 129.4, 129.96, 129.61, 128.53, 127.95, 125.53, 127.44, 129.17, 125.62, 124.68, 122.16, 119.42, 116.55, 112.61, 111.51, 109.6, 108.84, 112.13, 111.04, 109.69, 106.38, 105.19, 106.36, 110.28, 113.61, 114.23, 114.0, 115.76, 118.62, 116.31, 116.13, 117.33, 119.5, 121.53, 123.36, 124.74, 123.33, 119.78, 117.65, 112.89, 105.77, 106.6, 106.01, 104.92, 109.92, 107.85, 107.72, 108.56, 112.04, 112.26, 111.42, 112.29, 112.55, 115.45, 115.0, 114.43], "h": [124.09, 122.45, 122.3, 120.38, 121.75, 125.4, 126.82, 126.68, 126.1, 125.32, 125.86, 129.51, 129.32, 127.42, 128.37, 133.13, 128.74, 124.83, 124.98, 126.87, 126.69, 126.99, 125.23, 123.28, 124.31, 122.78, 122.58, 122.69, 120.96, 122.95, 122.67, 124.76, 125.06, 130.62, 130.73, 134.87, 132.91, 130.0, 128.94, 126.94, 130.15, 129.43, 128.08, 124.68, 122.56, 119.49, 116.55, 113.1, 112.59, 110.01, 111.57, 112.8, 111.52, 110.18, 106.87, 106.85, 108.9, 111.55, 116.45, 116.18, 115.73, 118.24, 118.62, 117.01, 117.48, 119.67, 121.12, 122.61, 124.43, 125.75, 123.45, 120.25, 119.58, 115.95, 107.45, 107.04, 106.49, 108.41, 111.47, 109.23, 109.67, 112.54, 113.18, 112.26, 113.19, 113.51, 114.81, 115.45, 116.06, 118.57], "l": [121.2, 117.98, 119.01, 117.04, 118.95, 121.81, 124.11, 124.56, 123.14, 122.91, 123.07, 121.27, 124.04, 123.66, 122.73, 127.12, 124.16, 122.47, 123.08, 123.58, 124.31, 123.76, 122.17, 120.61, 119.97, 119.47, 117.68, 118.44, 118.79, 119.54, 118.29, 121.33, 122.0, 123.23, 128.54, 129.85, 129.03, 125.56, 125.18, 123.47, 126.58, 125.27, 124.14, 120.95, 119.39, 114.86, 111.39, 110.44, 110.65, 106.0, 108.3, 109.71, 108.35, 106.48, 104.12, 104.37, 105.87, 108.3, 113.16, 112.68, 112.69, 115.69, 115.53, 114.64, 115.45, 117.17, 117.96, 120.09, 122.97, 121.67, 121.42, 116.83, 115.03, 107.31, 102.81, 104.41, 103.37, 104.53, 106.42, 107.14, 106.93, 108.13, 110.68, 110.21, 111.42, 112.08, 112.55, 113.88, 113.78, 115.49], "c": [121.6, 119.28, 122.27, 118.55, 121.73, 125.08, 125.02, 125.66, 124.15, 123.3, 125.6, 125.56, 126.31, 123.87, 126.86, 129.6, 125.3, 123.01, 124.19, 125.39, 125.46, 125.27, 122.42, 121.72, 123.9, 121.53, 119.23, 119.74, 120.71, 120.1, 121.18, 123.7, 123.3, 129.97, 129.13, 131.41, 129.42, 126.46, 125.5, 126.68, 128.21, 125.28, 127.17, 123.0, 119.42, 116.14, 112.58, 111.42, 110.86, 108.99, 111.55, 110.54, 109.1, 106.73, 104.89, 106.46, 108.78, 110.91, 115.23, 113.62, 114.32, 117.4, 116.63, 115.72, 115.83, 119.15, 120.49, 121.55, 123.88, 122.3, 121.53, 117.5, 117.37, 107.78, 105.07, 106.23, 105.4, 106.73, 106.62, 109.0, 107.7, 111.94, 110.9, 111.05, 112.02, 112.98, 114.19, 114.36, 114.0, 116.57], "ma20": [124.33, 124.03, 123.98, 123.84, 124.06, 124.31, 124.39, 124.44, 124.4, 124.17, 124.17, 124.13, 124.06, 123.83, 123.78, 123.95, 123.9, 123.93, 123.98, 124.12, 124.31, 124.61, 124.62, 124.77, 124.88, 124.71, 124.42, 124.12, 123.95, 123.79, 123.57, 123.47, 123.32, 123.63, 123.74, 123.83, 124.04, 124.21, 124.28, 124.34, 124.48, 124.48, 124.72, 124.78, 124.56, 124.29, 123.96, 123.54, 123.05, 122.49, 122.01, 121.35, 120.64, 119.48, 118.27, 117.02, 115.99, 115.21, 114.7, 114.04, 113.35, 112.96, 112.43, 112.06, 111.89, 112.04, 112.43, 112.94, 113.59, 114.25, 114.75, 115.1, 115.51, 115.57, 115.58, 115.56, 115.4, 115.19, 114.76, 114.53, 114.19, 113.92, 113.63, 113.4, 113.21, 112.9, 112.59, 112.23, 111.73, 111.45], "ma200": [95.61, 95.82, 96.04, 96.24, 96.46, 96.7, 96.96, 97.22, 97.47, 97.72, 97.97, 98.24, 98.51, 98.77, 99.05, 99.33, 99.6, 99.85, 100.09, 100.34, 100.59, 100.85, 101.09, 101.3, 101.54, 101.76, 101.97, 102.17, 102.38, 102.57, 102.78, 103.0, 103.21, 103.46, 103.7, 103.96, 104.22, 104.46, 104.68, 104.91, 105.12, 105.31, 105.53, 105.73, 105.91, 106.08, 106.24, 106.4, 106.56, 106.69, 106.83, 106.97, 107.12, 107.25, 107.37, 107.51, 107.64, 107.8, 107.99, 108.17, 108.36, 108.56, 108.76, 108.95, 109.12, 109.32, 109.52, 109.72, 109.94, 110.13, 110.33, 110.51, 110.69, 110.83, 110.96, 111.09, 111.21, 111.29, 111.36, 111.42, 111.48, 111.58, 111.67, 111.75, 111.83, 111.92, 112.02, 112.12, 112.22, 112.34]}, "GEN": {"d": ["04/14", "04/15", "04/16", "04/17", "04/20", "04/21", "04/22", "04/23", "04/24", "04/27", "04/28", "04/29", "04/30", "05/01", "05/04", "05/05", "05/06", "05/07", "05/08", "05/11", "05/12", "05/13", "05/14", "05/15", "05/18", "05/19", "05/20", "05/21", "05/22", "05/26", "05/27", "05/28", "05/29", "06/01", "06/02", "06/03", "06/04", "06/05", "06/08", "06/09", "06/10", "06/11", "06/12", "06/15", "06/16", "06/17", "06/18", "06/22", "06/23", "06/24", "06/25", "06/26", "06/29", "06/30", "07/01", "07/02", "07/06", "07/07", "07/08", "07/09", "07/10", "07/13", "07/14", "07/15", "07/16", "07/17", "07/20", "07/21", "07/22", "07/23", "07/24", "07/27", "07/28", "07/29", "07/30", "07/31", "08/03", "08/04", "08/05", "08/06", "08/07", "08/10", "08/11", "08/12", "08/13", "08/14", "08/17", "08/18", "08/19", "08/20"], "o": [18.9, 19.0, 19.81, 20.25, 19.86, 20.47, 19.88, 19.29, 18.78, 18.87, 19.18, 18.97, 18.91, 19.6, 19.25, 19.58, 19.57, 19.78, 20.95, 22.56, 22.3, 22.02, 23.24, 23.1, 23.2, 24.46, 24.08, 24.67, 25.03, 24.8, 24.73, 24.65, 24.6, 26.34, 26.99, 27.15, 26.97, 26.58, 26.27, 25.67, 24.48, 24.28, 23.97, 24.54, 24.34, 24.11, 23.87, 23.5, 23.36, 23.11, 23.5, 23.52, 24.8, 24.82, 25.13, 26.17, 26.39, 27.19, 26.76, 25.34, 26.42, 26.1, 25.51, 26.81, 26.85, 26.66, 26.62, 26.65, 26.21, 25.66, 25.47, 26.49, 27.02, 27.8, 27.3, 27.14, 28.31, 28.17, 28.5, 27.44, 28.87, 28.67, 28.88, 28.43, 28.75, 29.49, 28.04, 27.86, 27.52, 27.32], "h": [19.15, 19.75, 19.88, 20.25, 20.33, 20.62, 20.04, 19.34, 18.99, 19.18, 19.58, 19.16, 19.26, 19.79, 19.81, 19.75, 19.79, 20.26, 22.64, 22.98, 22.45, 23.26, 23.35, 23.5, 24.45, 24.83, 25.06, 25.02, 25.25, 24.99, 25.04, 25.08, 25.86, 27.81, 27.55, 27.21, 27.23, 26.81, 26.63, 25.83, 25.1, 24.66, 24.33, 24.91, 25.12, 24.76, 24.35, 24.12, 23.58, 24.08, 23.91, 24.52, 25.27, 25.08, 26.56, 26.81, 27.0, 27.28, 26.77, 26.15, 26.44, 26.46, 26.61, 27.21, 27.25, 27.28, 26.92, 26.76, 26.25, 25.66, 26.14, 26.98, 27.73, 28.12, 27.33, 27.53, 28.5, 28.48, 28.5, 28.32, 29.57, 29.74, 29.28, 28.61, 29.47, 29.57, 28.25, 27.96, 28.09, 28.38], "l": [18.78, 18.9, 19.45, 19.85, 19.81, 19.74, 19.64, 18.24, 18.59, 18.69, 19.07, 18.9, 18.65, 18.91, 19.25, 19.06, 19.13, 19.57, 20.91, 21.64, 21.8, 21.93, 22.7, 22.94, 23.18, 24.31, 23.67, 24.58, 24.8, 24.56, 24.58, 24.43, 24.44, 25.98, 26.59, 26.09, 26.52, 26.14, 25.75, 24.57, 24.22, 23.84, 23.57, 24.23, 24.18, 23.66, 23.22, 22.46, 23.1, 23.11, 23.1, 23.48, 24.67, 24.62, 25.13, 26.06, 26.28, 26.62, 25.8, 25.03, 25.53, 25.96, 25.35, 26.22, 26.44, 26.64, 26.27, 25.95, 25.5, 24.97, 25.43, 26.33, 26.96, 27.54, 26.61, 26.69, 27.88, 27.89, 27.83, 27.07, 27.52, 28.62, 28.58, 27.95, 28.54, 28.31, 27.38, 27.59, 27.5, 27.01], "c": [18.81, 19.57, 19.67, 20.01, 20.31, 19.8, 19.88, 18.71, 18.94, 18.92, 19.15, 19.04, 19.19, 19.27, 19.53, 19.6, 19.46, 20.08, 22.56, 22.28, 21.92, 23.17, 23.06, 23.33, 24.34, 24.32, 25.0, 24.85, 24.82, 24.76, 24.6, 24.55, 25.79, 27.76, 27.53, 26.5, 26.52, 26.28, 25.86, 24.97, 24.62, 23.94, 24.32, 24.41, 24.57, 23.93, 24.18, 23.01, 23.26, 23.56, 23.31, 24.45, 25.04, 24.89, 26.11, 26.67, 26.6, 26.78, 25.81, 25.99, 25.91, 26.16, 26.57, 26.45, 27.01, 26.74, 26.68, 26.11, 25.58, 25.07, 25.84, 26.74, 27.58, 27.63, 27.29, 27.45, 28.17, 28.27, 27.95, 28.1, 29.04, 29.16, 28.88, 28.51, 29.44, 28.35, 27.41, 27.64, 27.54, 28.17], "ma20": [19.25, 19.18, 19.14, 19.12, 19.09, 19.03, 19.04, 19.01, 19.02, 19.05, 19.1, 19.11, 19.14, 19.16, 19.18, 19.2, 19.24, 19.33, 19.57, 19.74, 19.89, 20.07, 20.24, 20.41, 20.61, 20.84, 21.09, 21.4, 21.69, 21.99, 22.26, 22.53, 22.86, 23.29, 23.69, 24.03, 24.39, 24.7, 24.86, 25.0, 25.13, 25.17, 25.23, 25.29, 25.3, 25.28, 25.24, 25.15, 25.07, 25.01, 24.94, 24.94, 24.9, 24.76, 24.69, 24.7, 24.7, 24.72, 24.72, 24.77, 24.84, 24.95, 25.06, 25.16, 25.28, 25.43, 25.55, 25.71, 25.82, 25.9, 26.02, 26.14, 26.26, 26.4, 26.46, 26.5, 26.58, 26.65, 26.76, 26.87, 27.02, 27.17, 27.29, 27.39, 27.51, 27.59, 27.63, 27.71, 27.8, 27.96], "ma200": [26.04, 25.99, 25.94, 25.9, 25.85, 25.8, 25.75, 25.7, 25.65, 25.6, 25.55, 25.5, 25.45, 25.4, 25.35, 25.3, 25.25, 25.2, 25.16, 25.12, 25.08, 25.05, 25.01, 24.99, 24.96, 24.94, 24.93, 24.91, 24.89, 24.88, 24.85, 24.82, 24.8, 24.78, 24.76, 24.74, 24.72, 24.69, 24.67, 24.64, 24.61, 24.57, 24.54, 24.51, 24.49, 24.46, 24.43, 24.4, 24.37, 24.35, 24.32, 24.29, 24.27, 24.25, 24.24, 24.23, 24.22, 24.22, 24.2, 24.19, 24.18, 24.17, 24.16, 24.15, 24.14, 24.13, 24.13, 24.12, 24.11, 24.1, 24.09, 24.09, 24.09, 24.1, 24.1, 24.11, 24.12, 24.13, 24.14, 24.15, 24.16, 24.17, 24.18, 24.19, 24.2, 24.21, 24.22, 24.23, 24.24, 24.25]}, "GM": {"d": ["04/14", "04/15", "04/16", "04/17", "04/20", "04/21", "04/22", "04/23", "04/24", "04/27", "04/28", "04/29", "04/30", "05/01", "05/04", "05/05", "05/06", "05/07", "05/08", "05/11", "05/12", "05/13", "05/14", "05/15", "05/18", "05/19", "05/20", "05/21", "05/22", "05/26", "05/27", "05/28", "05/29", "06/01", "06/02", "06/03", "06/04", "06/05", "06/08", "06/09", "06/10", "06/11", "06/12", "06/15", "06/16", "06/17", "06/18", "06/22", "06/23", "06/24", "06/25", "06/26", "06/29", "06/30", "07/01", "07/02", "07/06", "07/07", "07/08", "07/09", "07/10", "07/13", "07/14", "07/15", "07/16", "07/17", "07/20", "07/21", "07/22", "07/23", "07/24", "07/27", "07/28", "07/29", "07/30", "07/31", "08/03", "08/04", "08/05", "08/06", "08/07", "08/10", "08/11", "08/12", "08/13", "08/14", "08/17", "08/18", "08/19", "08/20"], "o": [78.46, 79.37, 77.42, 79.23, 80.69, 80.27, 79.42, 78.77, 78.06, 76.44, 77.85, 78.03, 76.95, 76.95, 75.75, 76.11, 78.03, 78.65, 78.96, 78.63, 75.24, 76.06, 75.72, 76.43, 74.66, 72.08, 73.23, 75.22, 77.83, 79.13, 80.48, 83.42, 84.62, 83.25, 82.71, 80.54, 81.88, 81.97, 81.67, 84.55, 83.51, 80.04, 81.72, 82.64, 84.65, 82.5, 80.61, 80.8, 79.19, 79.13, 79.1, 78.39, 78.25, 77.26, 76.99, 76.89, 76.53, 77.72, 75.22, 76.37, 76.89, 78.05, 76.78, 77.24, 77.5, 77.14, 76.99, 76.09, 80.5, 81.36, 80.54, 85.0, 87.61, 90.7, 89.74, 88.85, 89.51, 87.41, 88.46, 89.16, 86.89, 87.42, 88.13, 89.12, 86.85, 86.82, 86.25, 84.86, 84.48, 84.2], "h": [79.69, 79.37, 78.18, 82.49, 80.98, 81.02, 79.63, 78.93, 78.35, 78.66, 79.23, 78.14, 77.91, 77.33, 76.84, 76.99, 79.28, 79.2, 79.16, 78.83, 76.72, 77.49, 79.1, 76.99, 74.82, 72.72, 76.0, 77.2, 79.68, 80.0, 84.34, 85.01, 84.83, 83.26, 84.03, 83.94, 83.46, 83.1, 84.17, 85.1, 83.79, 81.09, 82.13, 84.96, 85.41, 83.18, 80.95, 83.32, 80.21, 80.57, 80.43, 79.5, 78.46, 77.26, 77.52, 77.2, 78.07, 77.72, 76.31, 76.9, 78.67, 78.5, 77.34, 78.16, 77.97, 77.94, 77.19, 80.1, 84.33, 81.74, 83.76, 87.08, 91.15, 91.85, 89.77, 89.11, 90.3, 88.59, 89.98, 89.3, 87.88, 88.81, 89.74, 89.12, 87.35, 87.18, 86.49, 84.86, 86.1, 86.44], "l": [77.93, 77.59, 76.84, 79.23, 80.16, 78.83, 78.46, 76.99, 76.75, 76.44, 74.62, 75.22, 76.34, 75.36, 75.05, 75.86, 77.66, 78.0, 77.9, 74.95, 74.8, 75.29, 75.72, 74.64, 72.93, 70.28, 73.04, 74.84, 77.52, 78.5, 80.48, 83.2, 81.04, 80.28, 80.84, 80.17, 81.46, 81.4, 81.51, 81.66, 79.0, 79.09, 80.5, 82.64, 82.22, 79.16, 78.94, 80.07, 78.6, 78.94, 78.39, 77.81, 77.06, 75.9, 75.2, 74.22, 76.12, 75.64, 74.58, 75.45, 76.88, 76.43, 75.96, 76.79, 76.62, 75.99, 75.36, 74.8, 80.04, 79.0, 80.43, 84.1, 87.21, 89.11, 86.61, 87.04, 87.29, 86.03, 88.26, 86.5, 86.33, 86.38, 87.88, 86.72, 86.23, 86.15, 84.34, 83.59, 84.12, 83.73], "c": [79.29, 77.61, 77.88, 81.14, 80.37, 78.88, 78.83, 78.35, 77.88, 77.79, 78.78, 76.45, 76.72, 75.61, 75.54, 75.99, 78.53, 78.24, 78.63, 75.13, 76.27, 75.65, 77.58, 74.7, 72.94, 72.47, 75.98, 77.04, 78.62, 79.62, 83.94, 84.17, 83.06, 82.5, 81.55, 81.52, 83.04, 82.11, 83.77, 83.76, 79.4, 80.85, 81.5, 84.07, 82.51, 79.58, 79.29, 80.43, 78.95, 78.95, 78.53, 78.1, 77.34, 77.08, 75.52, 76.0, 77.85, 76.03, 76.24, 76.65, 77.85, 76.72, 76.87, 77.64, 77.72, 76.07, 75.8, 79.52, 82.13, 80.67, 82.64, 87.04, 90.3, 89.4, 88.4, 88.86, 87.68, 88.31, 89.16, 86.94, 87.58, 87.96, 89.35, 86.76, 86.39, 86.77, 84.37, 83.71, 84.96, 86.15], "ma20": [74.78, 74.97, 75.19, 75.57, 75.95, 76.12, 76.24, 76.34, 76.46, 76.71, 77.02, 77.12, 77.21, 77.38, 77.49, 77.66, 77.76, 77.84, 77.96, 77.88, 77.73, 77.63, 77.62, 77.3, 76.92, 76.6, 76.46, 76.4, 76.43, 76.52, 76.78, 77.17, 77.48, 77.83, 78.13, 78.41, 78.63, 78.83, 79.08, 79.51, 79.67, 79.93, 80.13, 80.6, 81.07, 81.43, 81.6, 81.76, 81.78, 81.75, 81.48, 81.17, 80.89, 80.62, 80.32, 80.04, 79.78, 79.48, 79.1, 78.74, 78.67, 78.46, 78.23, 77.91, 77.67, 77.49, 77.32, 77.27, 77.43, 77.52, 77.72, 78.17, 78.82, 79.43, 80.08, 80.72, 81.21, 81.83, 82.47, 82.99, 83.47, 84.03, 84.66, 85.11, 85.55, 86.08, 86.51, 86.72, 86.86, 87.14], "ma200": [68.16, 68.3, 68.44, 68.59, 68.73, 68.87, 69.0, 69.14, 69.26, 69.39, 69.52, 69.64, 69.76, 69.87, 69.99, 70.11, 70.23, 70.38, 70.51, 70.63, 70.75, 70.86, 70.99, 71.1, 71.2, 71.31, 71.43, 71.55, 71.68, 71.82, 71.97, 72.13, 72.27, 72.41, 72.54, 72.67, 72.8, 72.93, 73.07, 73.21, 73.32, 73.43, 73.55, 73.68, 73.8, 73.91, 74.01, 74.13, 74.24, 74.34, 74.45, 74.55, 74.65, 74.74, 74.83, 74.92, 75.02, 75.1, 75.19, 75.28, 75.38, 75.47, 75.56, 75.65, 75.73, 75.81, 75.88, 75.98, 76.09, 76.2, 76.32, 76.47, 76.64, 76.81, 76.98, 77.15, 77.3, 77.46, 77.62, 77.76, 77.91, 78.02, 78.13, 78.23, 78.32, 78.41, 78.48, 78.56, 78.64, 78.73]}, "VTR": {"d": ["04/14", "04/15", "04/16", "04/17", "04/20", "04/21", "04/22", "04/23", "04/24", "04/27", "04/28", "04/29", "04/30", "05/01", "05/04", "05/05", "05/06", "05/07", "05/08", "05/11", "05/12", "05/13", "05/14", "05/15", "05/18", "05/19", "05/20", "05/21", "05/22", "05/26", "05/27", "05/28", "05/29", "06/01", "06/02", "06/03", "06/04", "06/05", "06/08", "06/09", "06/10", "06/11", "06/12", "06/15", "06/16", "06/17", "06/18", "06/22", "06/23", "06/24", "06/25", "06/26", "06/29", "06/30", "07/01", "07/02", "07/06", "07/07", "07/08", "07/09", "07/10", "07/13", "07/14", "07/15", "07/16", "07/17", "07/20", "07/21", "07/22", "07/23", "07/24", "07/27", "07/28", "07/29", "07/30", "07/31", "08/03", "08/04", "08/05", "08/06", "08/07", "08/10", "08/11", "08/12", "08/13", "08/14", "08/17", "08/18", "08/19", "08/20"], "o": [83.5, 84.57, 84.02, 84.68, 84.55, 84.0, 81.72, 80.17, 82.36, 82.77, 84.23, 87.06, 86.98, 87.32, 87.3, 87.31, 86.27, 85.8, 86.15, 87.16, 87.49, 88.1, 90.44, 90.53, 87.13, 87.62, 88.28, 88.94, 88.13, 88.52, 87.68, 87.58, 85.11, 83.23, 81.13, 80.02, 79.4, 78.59, 81.3, 79.85, 82.93, 84.61, 84.07, 83.24, 83.08, 83.16, 82.23, 81.33, 83.17, 85.65, 85.64, 87.84, 88.38, 88.45, 89.03, 90.52, 92.65, 92.21, 93.88, 91.92, 92.0, 90.94, 92.28, 92.7, 92.43, 95.76, 96.02, 96.05, 97.87, 97.43, 98.47, 100.32, 101.46, 98.19, 96.8, 92.04, 93.08, 89.9, 90.76, 93.27, 91.8, 92.0, 90.82, 86.94, 89.49, 90.19, 91.29, 90.28, 91.63, 91.93], "h": [85.0, 85.01, 85.06, 85.22, 85.11, 84.2, 81.96, 82.63, 83.85, 84.71, 87.49, 87.67, 87.9, 87.88, 87.98, 87.76, 87.38, 86.39, 87.64, 88.24, 88.75, 89.93, 90.46, 90.53, 88.1, 88.33, 89.32, 88.94, 88.75, 89.16, 88.42, 87.92, 85.13, 83.81, 81.8, 80.93, 79.92, 82.47, 81.62, 82.14, 84.58, 84.71, 84.52, 84.35, 83.91, 83.41, 82.23, 82.69, 85.19, 87.29, 87.23, 89.08, 88.89, 89.8, 90.31, 92.86, 93.05, 94.6, 94.22, 92.9, 92.18, 92.28, 92.81, 94.84, 95.06, 97.16, 96.62, 97.64, 97.95, 98.84, 100.84, 100.98, 101.6, 98.87, 97.61, 94.12, 94.07, 91.26, 92.97, 93.27, 93.4, 92.97, 90.89, 89.14, 90.57, 91.62, 91.63, 92.35, 92.02, 93.65], "l": [83.1, 83.86, 83.79, 83.76, 83.73, 80.81, 78.91, 80.04, 82.23, 82.22, 84.23, 86.13, 86.44, 86.89, 86.8, 85.38, 85.84, 84.67, 86.15, 86.32, 86.99, 87.49, 89.38, 86.86, 86.58, 87.41, 87.63, 86.99, 87.39, 86.95, 87.46, 85.1, 82.99, 81.09, 79.19, 78.17, 77.63, 78.32, 78.39, 79.24, 82.35, 83.07, 83.45, 82.59, 82.52, 81.52, 80.55, 80.35, 83.07, 84.9, 85.64, 87.13, 87.54, 87.9, 88.71, 89.71, 91.47, 92.2, 92.31, 91.72, 89.56, 90.77, 91.81, 91.75, 92.43, 95.35, 95.48, 95.84, 96.75, 96.64, 98.22, 99.71, 98.09, 96.92, 90.86, 90.27, 90.82, 88.45, 90.18, 91.71, 91.74, 91.54, 86.92, 86.94, 89.35, 90.16, 90.41, 90.28, 91.01, 91.84], "c": [84.84, 84.38, 85.01, 84.6, 84.16, 81.63, 79.63, 82.45, 83.13, 84.21, 87.06, 86.86, 87.35, 87.51, 87.28, 86.27, 86.12, 86.05, 86.75, 87.18, 88.01, 89.82, 89.44, 86.94, 87.63, 87.84, 88.08, 87.49, 87.67, 87.86, 87.54, 85.29, 83.93, 81.23, 79.66, 78.58, 78.64, 81.54, 79.16, 81.99, 83.86, 83.4, 84.11, 82.97, 83.4, 81.67, 81.12, 82.56, 84.87, 86.07, 86.92, 88.53, 88.78, 88.8, 89.65, 92.52, 92.21, 94.07, 92.41, 91.74, 90.66, 92.06, 92.4, 92.29, 95.04, 96.1, 96.25, 97.62, 97.18, 97.92, 100.53, 100.11, 98.14, 97.72, 91.92, 93.51, 90.85, 90.85, 92.53, 92.26, 93.36, 91.95, 86.96, 89.01, 90.29, 91.52, 91.17, 91.2, 91.85, 92.68], "ma20": [82.93, 82.8, 82.74, 82.75, 82.88, 82.92, 82.84, 82.88, 82.95, 83.12, 83.44, 83.72, 84.01, 84.24, 84.48, 84.64, 84.77, 84.85, 84.96, 85.12, 85.28, 85.55, 85.78, 85.89, 86.07, 86.38, 86.8, 87.05, 87.28, 87.46, 87.48, 87.41, 87.23, 86.92, 86.54, 86.15, 85.78, 85.56, 85.18, 84.92, 84.71, 84.39, 84.12, 83.92, 83.71, 83.4, 83.06, 82.81, 82.67, 82.58, 82.55, 82.71, 82.95, 83.33, 83.83, 84.53, 85.21, 85.83, 86.5, 86.98, 87.32, 87.76, 88.17, 88.64, 89.22, 89.94, 90.7, 91.45, 92.06, 92.66, 93.34, 93.92, 94.39, 94.83, 94.94, 94.99, 94.93, 94.77, 94.77, 94.8, 94.93, 94.93, 94.65, 94.49, 94.25, 94.02, 93.77, 93.45, 93.18, 92.92], "ma200": [73.7, 73.82, 73.94, 74.05, 74.17, 74.27, 74.36, 74.47, 74.58, 74.69, 74.81, 74.92, 75.04, 75.16, 75.28, 75.39, 75.49, 75.6, 75.7, 75.81, 75.93, 76.06, 76.18, 76.29, 76.4, 76.51, 76.62, 76.72, 76.83, 76.93, 77.03, 77.13, 77.21, 77.29, 77.36, 77.42, 77.48, 77.56, 77.62, 77.69, 77.78, 77.87, 77.96, 78.04, 78.13, 78.21, 78.28, 78.36, 78.46, 78.56, 78.66, 78.77, 78.88, 78.98, 79.09, 79.21, 79.34, 79.48, 79.61, 79.75, 79.87, 80.0, 80.13, 80.26, 80.39, 80.54, 80.68, 80.82, 80.96, 81.11, 81.27, 81.43, 81.59, 81.75, 81.87, 82.01, 82.13, 82.25, 82.37, 82.48, 82.6, 82.71, 82.8, 82.91, 83.01, 83.12, 83.23, 83.34, 83.44, 83.54]}, "WELL": {"d": ["04/14", "04/15", "04/16", "04/17", "04/20", "04/21", "04/22", "04/23", "04/24", "04/27", "04/28", "04/29", "04/30", "05/01", "05/04", "05/05", "05/06", "05/07", "05/08", "05/11", "05/12", "05/13", "05/14", "05/15", "05/18", "05/19", "05/20", "05/21", "05/22", "05/26", "05/27", "05/28", "05/29", "06/01", "06/02", "06/03", "06/04", "06/05", "06/08", "06/09", "06/10", "06/11", "06/12", "06/15", "06/16", "06/17", "06/18", "06/22", "06/23", "06/24", "06/25", "06/26", "06/29", "06/30", "07/01", "07/02", "07/06", "07/07", "07/08", "07/09", "07/10", "07/13", "07/14", "07/15", "07/16", "07/17", "07/20", "07/21", "07/22", "07/23", "07/24", "07/27", "07/28", "07/29", "07/30", "07/31", "08/03", "08/04", "08/05", "08/06", "08/07", "08/10", "08/11", "08/12", "08/13", "08/14", "08/17", "08/18", "08/19", "08/20"], "o": [205.34, 209.6, 210.75, 213.24, 209.87, 208.53, 205.69, 200.17, 207.42, 205.7, 208.24, 213.79, 210.74, 216.62, 214.88, 217.24, 213.48, 214.58, 212.52, 214.27, 213.13, 215.87, 221.41, 218.12, 212.91, 212.03, 218.29, 217.52, 218.0, 217.58, 216.99, 213.94, 209.99, 205.03, 197.25, 195.32, 202.31, 200.88, 207.12, 201.81, 208.7, 212.59, 212.22, 212.65, 213.45, 213.19, 208.52, 207.8, 213.06, 218.85, 221.68, 227.03, 227.24, 226.31, 227.6, 231.15, 235.87, 234.53, 236.62, 233.67, 232.73, 233.17, 235.4, 236.69, 234.26, 244.07, 243.46, 242.27, 247.24, 244.93, 248.48, 251.14, 251.4, 243.15, 239.13, 234.21, 235.06, 230.31, 231.43, 238.01, 234.26, 236.01, 232.48, 225.49, 231.5, 234.14, 234.44, 235.74, 235.44, 235.9], "h": [210.32, 210.75, 214.11, 214.26, 210.31, 208.68, 206.3, 207.84, 210.87, 210.18, 214.1, 218.84, 217.84, 218.07, 217.8, 217.24, 216.04, 215.23, 216.93, 216.83, 217.4, 221.68, 221.41, 218.12, 215.4, 218.0, 220.5, 217.99, 218.4, 219.75, 217.81, 215.51, 210.87, 207.4, 198.46, 200.92, 204.01, 210.41, 208.24, 207.9, 212.84, 214.33, 214.92, 215.62, 215.73, 214.17, 208.52, 212.49, 219.0, 223.94, 224.47, 228.53, 228.03, 230.07, 231.85, 236.06, 236.34, 239.11, 238.0, 234.7, 233.01, 235.73, 237.22, 238.03, 241.79, 246.43, 245.36, 247.45, 247.35, 250.12, 252.94, 252.17, 255.2, 245.3, 240.81, 237.1, 236.4, 232.34, 236.62, 238.3, 237.46, 236.13, 232.85, 230.61, 235.59, 236.43, 236.28, 238.85, 236.72, 238.78], "l": [204.09, 207.74, 210.54, 209.3, 207.42, 200.68, 198.2, 199.35, 207.02, 204.32, 208.24, 210.69, 209.91, 215.27, 214.71, 211.28, 212.3, 207.96, 212.52, 212.45, 212.79, 215.6, 216.89, 213.21, 211.78, 212.03, 214.34, 214.64, 215.24, 215.73, 214.11, 209.29, 205.33, 197.33, 194.67, 195.29, 198.25, 200.0, 198.97, 199.02, 207.9, 210.53, 211.95, 211.65, 212.06, 206.31, 202.9, 206.21, 211.66, 217.1, 219.33, 223.04, 223.92, 225.16, 226.97, 229.22, 231.01, 233.27, 233.81, 231.71, 228.37, 230.9, 234.0, 232.32, 233.87, 242.23, 242.68, 242.27, 244.16, 243.51, 246.03, 248.34, 242.24, 238.61, 234.14, 232.63, 232.06, 226.48, 229.32, 232.86, 233.69, 233.52, 224.7, 224.97, 231.21, 233.14, 233.0, 235.0, 234.3, 235.11], "c": [210.27, 210.61, 213.78, 209.8, 208.74, 205.69, 199.02, 207.53, 208.04, 209.29, 213.5, 211.37, 216.6, 216.17, 216.4, 213.57, 215.73, 212.23, 213.9, 214.11, 216.76, 220.14, 217.75, 213.74, 212.61, 218.0, 218.61, 216.01, 216.17, 218.13, 214.18, 210.29, 205.33, 197.36, 195.35, 199.59, 200.85, 206.93, 200.0, 206.77, 211.36, 210.67, 214.23, 212.82, 213.5, 206.55, 206.65, 211.45, 217.67, 221.43, 223.73, 227.33, 227.73, 226.97, 230.19, 236.06, 232.69, 237.59, 233.9, 232.12, 231.59, 234.55, 236.0, 233.29, 241.49, 243.25, 244.84, 246.37, 245.04, 247.05, 252.07, 248.34, 243.57, 241.08, 235.63, 234.44, 233.1, 231.57, 236.36, 235.11, 236.03, 234.16, 225.16, 230.27, 234.44, 235.52, 235.3, 235.44, 235.73, 237.4], "ma20": [201.18, 201.09, 201.35, 201.57, 202.25, 202.81, 202.97, 203.54, 204.2, 204.91, 205.85, 206.57, 207.49, 208.22, 209.02, 209.66, 210.25, 210.57, 210.93, 211.32, 211.64, 212.12, 212.32, 212.51, 212.71, 213.32, 214.3, 214.73, 215.13, 215.58, 215.61, 215.56, 214.99, 214.05, 213.0, 212.3, 211.56, 211.29, 210.6, 210.23, 209.96, 209.48, 209.31, 209.26, 209.31, 208.73, 208.14, 207.91, 207.98, 208.15, 208.63, 209.48, 210.6, 212.08, 213.82, 215.64, 217.24, 218.77, 220.46, 221.73, 222.74, 223.94, 225.03, 226.05, 227.45, 229.28, 231.19, 232.94, 234.31, 235.59, 237.01, 238.06, 238.85, 239.55, 239.83, 239.74, 239.77, 239.46, 239.59, 239.74, 239.96, 239.94, 239.4, 239.25, 238.89, 238.51, 238.03, 237.48, 237.02, 236.54], "ma200": [181.81, 182.11, 182.43, 182.73, 183.03, 183.31, 183.54, 183.83, 184.12, 184.42, 184.72, 185.0, 185.31, 185.62, 185.92, 186.21, 186.5, 186.76, 187.04, 187.31, 187.6, 187.92, 188.19, 188.44, 188.69, 188.96, 189.23, 189.47, 189.72, 189.97, 190.22, 190.44, 190.65, 190.83, 191.01, 191.2, 191.4, 191.63, 191.81, 192.02, 192.26, 192.5, 192.75, 192.98, 193.22, 193.42, 193.63, 193.86, 194.11, 194.39, 194.67, 194.97, 195.28, 195.58, 195.9, 196.24, 196.59, 196.96, 197.3, 197.65, 197.98, 198.29, 198.63, 198.95, 199.29, 199.63, 199.98, 200.32, 200.68, 201.05, 201.45, 201.83, 202.21, 202.59, 202.95, 203.3, 203.62, 203.93, 204.26, 204.57, 204.87, 205.18, 205.43, 205.71, 206.0, 206.28, 206.57, 206.87, 207.15, 207.44]}, "MEDP": {"d": ["04/14", "04/15", "04/16", "04/17", "04/20", "04/21", "04/22", "04/23", "04/24", "04/27", "04/28", "04/29", "04/30", "05/01", "05/04", "05/05", "05/06", "05/07", "05/08", "05/11", "05/12", "05/13", "05/14", "05/15", "05/18", "05/19", "05/20", "05/21", "05/22", "05/26", "05/27", "05/28", "05/29", "06/01", "06/02", "06/03", "06/04", "06/05", "06/08", "06/09", "06/10", "06/11", "06/12", "06/15", "06/16", "06/17", "06/18", "06/22", "06/23", "06/24", "06/25", "06/26", "06/29", "06/30", "07/01", "07/02", "07/06", "07/07", "07/08", "07/09", "07/10", "07/13", "07/14", "07/15", "07/16", "07/17", "07/20", "07/21", "07/22", "07/23", "07/24", "07/27", "07/28", "07/29", "07/30", "07/31", "08/03", "08/04", "08/05", "08/06", "08/07", "08/10", "08/11", "08/12", "08/13", "08/14", "08/17", "08/18", "08/19", "08/20"], "o": [501.25, 522.46, 518.35, 517.73, 518.38, 528.3, 519.39, 375.15, 390.01, 415.28, 420.73, 405.69, 413.86, 420.0, 415.11, 419.0, 433.24, 429.39, 430.51, 427.44, 419.52, 418.25, 424.35, 419.57, 417.1, 422.18, 417.0, 417.99, 431.74, 443.54, 429.11, 428.0, 446.72, 446.43, 445.35, 445.4, 454.24, 453.53, 454.25, 460.36, 465.35, 463.44, 476.86, 467.34, 467.64, 457.1, 463.05, 458.82, 455.66, 479.0, 517.87, 516.5, 530.0, 534.0, 546.51, 547.79, 554.37, 556.47, 534.82, 530.51, 536.31, 542.18, 530.19, 537.28, 529.64, 529.99, 537.35, 518.76, 531.21, 647.0, 612.07, 603.15, 589.74, 570.85, 577.15, 577.18, 588.07, 577.19, 584.03, 588.0, 590.45, 588.99, 604.32, 598.2, 600.4, 581.95, 578.29, 595.81, 600.0, 598.79], "h": [520.36, 529.26, 530.97, 526.65, 530.08, 530.07, 527.75, 407.61, 415.97, 422.5, 424.99, 416.37, 421.65, 422.0, 421.28, 433.96, 435.15, 434.86, 430.51, 427.44, 420.64, 424.57, 429.22, 421.74, 427.03, 425.56, 422.42, 430.36, 434.86, 443.54, 434.94, 450.61, 453.54, 460.9, 449.38, 451.68, 466.22, 458.0, 462.09, 471.23, 478.0, 478.8, 479.3, 474.98, 471.37, 466.68, 463.34, 461.92, 473.83, 517.83, 533.09, 528.25, 540.0, 539.51, 555.0, 562.47, 567.91, 558.84, 538.68, 543.93, 540.37, 544.42, 540.15, 538.6, 540.11, 540.86, 539.8, 537.86, 536.29, 677.9, 612.07, 606.64, 601.0, 593.28, 586.11, 579.57, 588.07, 577.64, 590.4, 590.0, 594.99, 603.34, 608.18, 604.89, 602.5, 586.28, 597.47, 598.77, 612.11, 627.59], "l": [501.25, 515.91, 513.3, 512.77, 515.84, 511.38, 503.77, 373.0, 390.01, 410.54, 409.11, 402.43, 408.29, 414.11, 407.69, 413.35, 425.23, 425.82, 418.04, 414.36, 413.37, 413.0, 418.97, 414.7, 412.21, 418.96, 403.46, 408.4, 421.52, 422.88, 424.01, 422.0, 441.92, 444.41, 438.04, 434.38, 454.14, 442.95, 450.06, 456.97, 458.55, 463.44, 466.4, 462.91, 455.05, 455.02, 447.95, 445.01, 450.97, 479.0, 512.55, 516.0, 522.95, 523.69, 530.97, 546.61, 542.86, 540.97, 520.88, 528.48, 530.07, 523.99, 521.46, 525.45, 528.21, 527.0, 526.93, 514.47, 525.17, 592.65, 592.8, 588.77, 570.61, 568.31, 565.1, 565.74, 570.34, 563.45, 579.3, 576.72, 582.08, 588.99, 598.22, 593.14, 581.29, 571.73, 571.01, 588.38, 596.22, 597.41], "c": [520.0, 518.54, 515.65, 520.6, 528.44, 514.9, 508.46, 393.42, 410.54, 421.37, 409.65, 413.59, 418.66, 417.54, 417.02, 430.32, 426.79, 428.71, 424.0, 417.29, 419.75, 423.76, 419.17, 415.27, 420.67, 419.91, 421.87, 430.1, 432.8, 429.11, 428.0, 448.12, 447.11, 451.47, 445.59, 450.82, 458.69, 454.25, 457.9, 466.79, 465.73, 475.07, 467.34, 467.5, 461.6, 457.09, 460.2, 455.66, 473.48, 512.79, 519.96, 527.07, 534.72, 529.59, 543.57, 557.6, 565.09, 546.29, 531.99, 535.5, 538.23, 530.19, 536.17, 529.23, 537.92, 537.73, 527.93, 531.67, 528.12, 605.82, 601.38, 589.37, 570.97, 584.93, 578.3, 577.11, 573.29, 575.08, 587.75, 585.01, 590.67, 602.43, 605.5, 596.98, 581.95, 578.5, 597.12, 590.3, 608.27, 612.64], "ma20": [479.77, 482.94, 485.98, 488.97, 492.76, 495.66, 498.05, 494.38, 491.57, 490.08, 487.55, 484.22, 480.68, 476.64, 472.69, 468.78, 464.09, 460.45, 456.97, 452.77, 447.76, 443.02, 438.2, 432.93, 427.54, 422.79, 418.47, 420.3, 421.41, 421.8, 422.72, 424.44, 425.87, 427.56, 428.99, 430.02, 431.61, 432.89, 434.58, 437.06, 439.36, 441.92, 444.33, 446.94, 448.99, 450.85, 452.76, 454.04, 456.08, 460.26, 464.86, 468.81, 473.19, 477.09, 481.99, 487.33, 492.65, 497.25, 500.96, 504.39, 508.02, 510.77, 514.21, 517.3, 521.12, 525.15, 528.54, 532.34, 535.07, 539.72, 543.79, 546.91, 548.72, 551.48, 553.22, 554.2, 554.61, 556.05, 558.83, 561.31, 563.93, 567.54, 571.01, 574.4, 576.6, 578.64, 582.1, 585.03, 589.04, 589.38], "ma200": [503.29, 504.33, 505.34, 506.34, 507.35, 508.32, 509.27, 509.62, 510.07, 510.54, 510.97, 511.43, 511.96, 512.48, 512.97, 513.56, 514.15, 513.9, 513.83, 513.64, 513.5, 513.36, 513.21, 513.1, 513.07, 513.05, 513.0, 512.97, 512.98, 512.98, 512.95, 512.94, 512.88, 512.8, 512.73, 512.7, 512.68, 512.64, 512.6, 512.67, 512.68, 512.72, 512.71, 512.68, 512.62, 512.53, 512.46, 512.34, 512.29, 512.42, 512.56, 512.77, 513.06, 513.22, 513.48, 513.79, 514.16, 514.4, 514.55, 514.74, 514.94, 515.11, 515.3, 515.51, 515.71, 515.9, 515.97, 515.91, 515.87, 516.23, 516.59, 516.88, 517.08, 517.41, 517.79, 518.04, 518.32, 518.63, 518.96, 519.24, 519.48, 519.76, 520.05, 520.06, 519.94, 519.85, 519.93, 519.96, 520.1, 520.24]}, "THG": {"d": ["04/14", "04/15", "04/16", "04/17", "04/20", "04/21", "04/22", "04/23", "04/24", "04/27", "04/28", "04/29", "04/30", "05/01", "05/04", "05/05", "05/06", "05/07", "05/08", "05/11", "05/12", "05/13", "05/14", "05/15", "05/18", "05/19", "05/20", "05/21", "05/22", "05/26", "05/27", "05/28", "05/29", "06/01", "06/02", "06/03", "06/04", "06/05", "06/08", "06/09", "06/10", "06/11", "06/12", "06/15", "06/16", "06/17", "06/18", "06/22", "06/23", "06/24", "06/25", "06/26", "06/29", "06/30", "07/01", "07/02", "07/06", "07/07", "07/08", "07/09", "07/10", "07/13", "07/14", "07/15", "07/16", "07/17", "07/20", "07/21", "07/22", "07/23", "07/24", "07/27", "07/28", "07/29", "07/30", "07/31", "08/03", "08/04", "08/05", "08/06", "08/07", "08/10", "08/11", "08/12", "08/13", "08/14", "08/17", "08/18", "08/19", "08/20"], "o": [177.37, 177.35, 175.95, 177.7, 180.89, 179.71, 179.26, 178.46, 179.74, 176.18, 180.05, 179.66, 190.73, 188.38, 184.46, 182.01, 183.82, 184.66, 186.25, 189.17, 190.01, 187.7, 191.04, 191.37, 194.47, 193.77, 193.49, 192.65, 193.67, 194.11, 196.03, 189.72, 186.41, 184.21, 184.7, 186.15, 188.26, 187.47, 190.93, 191.06, 193.7, 197.38, 195.64, 196.54, 199.81, 197.86, 201.13, 198.35, 202.72, 209.28, 210.79, 210.13, 211.56, 213.55, 215.8, 217.3, 221.1, 221.61, 216.55, 213.0, 215.14, 216.05, 215.31, 209.91, 205.65, 207.9, 213.17, 213.97, 214.41, 212.36, 214.48, 217.67, 220.41, 226.51, 232.44, 228.56, 232.58, 230.14, 229.24, 230.55, 229.0, 227.58, 224.56, 220.12, 224.0, 223.73, 225.0, 223.3, 222.95, 218.35], "h": [179.62, 178.48, 177.9, 181.71, 182.74, 180.56, 179.26, 181.78, 181.39, 180.31, 181.45, 179.66, 190.73, 188.81, 187.46, 184.98, 187.09, 187.32, 188.3, 189.7, 190.39, 189.87, 192.38, 194.79, 198.62, 196.57, 194.5, 195.0, 195.86, 198.02, 196.47, 192.65, 188.43, 186.55, 188.14, 187.3, 190.18, 192.86, 191.39, 193.51, 197.01, 198.4, 198.5, 199.58, 201.45, 201.36, 201.13, 203.17, 207.79, 213.05, 212.1, 213.13, 214.76, 220.0, 219.3, 221.7, 222.07, 225.29, 218.79, 215.46, 216.14, 217.46, 217.26, 211.12, 210.27, 213.86, 216.0, 215.68, 214.49, 214.46, 218.12, 221.19, 224.69, 235.16, 232.76, 233.18, 236.07, 231.19, 231.69, 232.96, 231.32, 229.04, 225.96, 224.61, 224.6, 225.38, 226.38, 225.74, 222.95, 224.26], "l": [177.02, 176.11, 174.64, 177.7, 178.88, 177.72, 176.55, 177.78, 176.29, 176.18, 178.63, 176.49, 180.86, 185.61, 181.79, 181.79, 183.82, 184.66, 183.88, 187.82, 187.62, 185.77, 190.09, 191.31, 194.41, 192.08, 191.11, 190.44, 192.04, 193.34, 189.71, 186.32, 185.27, 183.81, 184.62, 184.03, 185.88, 187.47, 189.52, 190.53, 193.1, 195.12, 195.64, 196.01, 198.43, 197.64, 197.01, 198.35, 202.39, 207.58, 206.83, 209.59, 210.22, 212.19, 215.71, 215.21, 219.54, 217.56, 212.01, 210.73, 212.5, 214.75, 213.78, 206.12, 203.36, 207.9, 212.98, 212.01, 211.17, 210.96, 214.05, 217.67, 220.41, 223.02, 226.15, 228.33, 231.29, 226.9, 227.83, 228.71, 227.06, 224.91, 221.92, 219.24, 220.89, 222.66, 221.53, 221.97, 218.89, 217.03], "c": [177.57, 176.29, 177.49, 180.97, 179.12, 179.81, 178.01, 180.99, 176.68, 178.33, 179.83, 176.65, 186.78, 185.93, 182.39, 183.74, 185.47, 185.4, 188.22, 188.97, 188.67, 188.38, 190.94, 193.7, 196.58, 192.85, 193.62, 194.63, 194.18, 194.92, 190.82, 186.48, 185.3, 184.2, 186.13, 185.45, 186.08, 192.25, 189.95, 191.5, 196.43, 195.12, 197.65, 198.27, 199.2, 199.67, 197.93, 201.29, 207.64, 210.4, 207.56, 212.61, 214.54, 214.12, 216.76, 221.61, 220.19, 218.46, 212.24, 214.34, 213.99, 216.86, 214.16, 206.9, 207.0, 213.23, 214.35, 215.06, 212.87, 214.13, 218.11, 219.52, 224.15, 232.34, 230.09, 232.63, 232.33, 228.04, 229.12, 231.46, 229.08, 225.75, 221.94, 222.18, 223.19, 225.29, 222.1, 222.17, 218.91, 223.11], "ma20": [172.98, 173.15, 173.55, 174.16, 174.71, 175.18, 175.51, 176.08, 176.34, 176.83, 177.23, 177.44, 178.21, 178.74, 179.14, 179.59, 179.97, 180.29, 180.91, 181.43, 181.99, 182.59, 183.26, 183.9, 184.77, 185.43, 186.21, 186.89, 187.76, 188.59, 189.14, 189.63, 189.56, 189.47, 189.66, 189.75, 189.78, 190.12, 190.21, 190.33, 190.72, 191.06, 191.39, 191.62, 191.75, 192.09, 192.31, 192.64, 193.31, 194.09, 194.93, 196.23, 197.69, 199.19, 200.72, 202.53, 204.23, 205.54, 206.66, 207.8, 208.68, 209.77, 210.59, 211.02, 211.41, 212.09, 212.91, 213.6, 213.86, 214.05, 214.58, 214.92, 215.4, 216.31, 216.98, 217.53, 218.14, 218.62, 219.46, 220.32, 221.07, 221.52, 221.9, 222.67, 223.48, 224.08, 224.47, 224.82, 225.13, 225.58], "ma200": [172.66, 172.73, 172.78, 172.87, 172.97, 173.06, 173.16, 173.26, 173.34, 173.43, 173.52, 173.59, 173.73, 173.86, 173.96, 174.07, 174.19, 174.29, 174.42, 174.56, 174.69, 174.82, 174.96, 175.12, 175.26, 175.4, 175.53, 175.66, 175.78, 175.93, 176.05, 176.16, 176.25, 176.33, 176.42, 176.52, 176.61, 176.73, 176.83, 176.93, 177.05, 177.18, 177.32, 177.46, 177.6, 177.75, 177.88, 178.02, 178.17, 178.35, 178.52, 178.7, 178.9, 179.08, 179.28, 179.51, 179.76, 179.99, 180.18, 180.39, 180.6, 180.82, 181.03, 181.2, 181.35, 181.53, 181.71, 181.89, 182.06, 182.23, 182.41, 182.6, 182.81, 183.09, 183.37, 183.66, 183.95, 184.24, 184.56, 184.87, 185.17, 185.44, 185.69, 185.94, 186.19, 186.46, 186.74, 187.03, 187.28, 187.56]}, "FCPT": {"d": ["04/14", "04/15", "04/16", "04/17", "04/20", "04/21", "04/22", "04/23", "04/24", "04/27", "04/28", "04/29", "04/30", "05/01", "05/04", "05/05", "05/06", "05/07", "05/08", "05/11", "05/12", "05/13", "05/14", "05/15", "05/18", "05/19", "05/20", "05/21", "05/22", "05/26", "05/27", "05/28", "05/29", "06/01", "06/02", "06/03", "06/04", "06/05", "06/08", "06/09", "06/10", "06/11", "06/12", "06/15", "06/16", "06/17", "06/18", "06/22", "06/23", "06/24", "06/25", "06/26", "06/29", "06/30", "07/01", "07/02", "07/06", "07/07", "07/08", "07/09", "07/10", "07/13", "07/14", "07/15", "07/16", "07/17", "07/20", "07/21", "07/22", "07/23", "07/24", "07/27", "07/28", "07/29", "07/30", "07/31", "08/03", "08/04", "08/05", "08/06", "08/07", "08/10", "08/11", "08/12", "08/13", "08/14", "08/17", "08/18", "08/19", "08/20"], "o": [24.48, 24.41, 24.48, 24.78, 25.29, 25.06, 24.92, 24.7, 24.72, 25.08, 25.2, 24.98, 25.02, 25.26, 24.84, 24.74, 24.91, 25.1, 25.19, 24.89, 24.89, 24.53, 24.17, 24.15, 24.05, 24.58, 24.44, 24.47, 24.62, 24.71, 25.02, 24.54, 24.63, 24.39, 23.9, 23.95, 24.13, 23.72, 24.29, 24.37, 24.83, 24.91, 24.63, 24.83, 24.68, 24.42, 24.24, 24.03, 24.34, 24.6, 24.7, 24.85, 25.24, 24.9, 24.64, 24.69, 24.92, 25.21, 25.31, 24.97, 24.63, 25.12, 25.19, 25.35, 25.41, 26.53, 26.24, 26.26, 26.22, 26.15, 25.91, 25.99, 26.12, 26.03, 26.11, 25.46, 25.49, 25.18, 25.32, 25.4, 25.08, 25.0, 24.52, 24.48, 25.14, 25.09, 25.11, 25.07, 25.07, 25.14], "h": [24.7, 24.71, 24.89, 25.37, 25.35, 25.17, 24.99, 25.02, 25.14, 25.39, 25.22, 25.22, 25.23, 25.28, 25.01, 24.9, 25.14, 25.24, 25.32, 25.05, 24.93, 24.59, 24.29, 24.19, 24.54, 24.77, 24.78, 24.71, 24.79, 24.99, 25.11, 24.73, 24.68, 24.54, 24.23, 24.18, 24.21, 24.57, 24.39, 24.75, 24.95, 25.06, 24.92, 24.88, 24.77, 24.58, 24.26, 24.32, 24.67, 24.88, 24.93, 25.23, 25.24, 24.98, 24.88, 25.11, 25.05, 25.62, 25.31, 25.03, 25.0, 25.29, 25.32, 25.67, 26.45, 26.86, 26.5, 26.49, 26.34, 26.26, 26.09, 26.1, 26.12, 26.36, 26.2, 25.63, 25.83, 25.27, 25.32, 25.49, 25.23, 25.0, 24.72, 24.97, 25.31, 25.31, 25.18, 25.19, 25.28, 25.55], "l": [24.34, 24.33, 24.46, 24.78, 24.97, 24.84, 24.45, 24.53, 24.58, 24.99, 24.91, 24.93, 24.4, 24.96, 24.63, 24.59, 24.91, 24.93, 24.8, 24.73, 24.49, 24.05, 23.98, 23.86, 24.05, 24.29, 24.39, 24.27, 24.36, 24.65, 24.55, 24.45, 24.27, 23.9, 23.83, 23.7, 23.52, 23.6, 23.94, 24.21, 24.56, 24.44, 24.58, 24.36, 24.44, 23.83, 23.94, 24.02, 24.18, 24.58, 24.47, 24.81, 24.67, 24.52, 24.45, 24.62, 24.8, 24.84, 24.87, 24.71, 24.57, 25.03, 25.06, 25.21, 25.41, 26.14, 26.16, 26.14, 25.98, 25.63, 25.85, 25.7, 25.86, 25.95, 25.09, 25.1, 25.22, 24.82, 24.81, 24.95, 24.97, 24.43, 24.28, 24.48, 25.06, 25.01, 24.96, 24.87, 25.01, 25.03], "c": [24.54, 24.7, 24.76, 25.28, 25.04, 24.86, 24.56, 24.79, 25.06, 25.03, 25.15, 24.95, 25.2, 25.0, 24.72, 24.78, 25.04, 25.1, 24.81, 24.78, 24.69, 24.08, 24.18, 24.12, 24.52, 24.41, 24.65, 24.63, 24.7, 24.96, 24.61, 24.68, 24.54, 23.93, 24.08, 23.77, 23.59, 24.34, 24.14, 24.62, 24.8, 24.47, 24.9, 24.49, 24.54, 24.09, 24.14, 24.05, 24.59, 24.79, 24.66, 25.21, 24.99, 24.55, 24.53, 25.11, 25.01, 25.28, 24.9, 24.71, 24.96, 25.19, 25.15, 25.22, 26.42, 26.33, 26.49, 26.38, 26.18, 25.73, 25.95, 25.7, 25.87, 26.2, 25.42, 25.6, 25.3, 25.17, 25.27, 25.06, 25.1, 24.49, 24.53, 24.94, 25.16, 25.21, 25.07, 24.89, 25.21, 25.38], "ma20": [23.82, 23.8, 23.81, 23.85, 23.92, 23.99, 24.06, 24.13, 24.23, 24.33, 24.43, 24.51, 24.61, 24.69, 24.77, 24.84, 24.89, 24.9, 24.9, 24.91, 24.91, 24.88, 24.85, 24.8, 24.77, 24.75, 24.75, 24.74, 24.73, 24.72, 24.7, 24.68, 24.65, 24.59, 24.56, 24.51, 24.44, 24.4, 24.37, 24.36, 24.37, 24.39, 24.42, 24.44, 24.44, 24.43, 24.4, 24.37, 24.37, 24.36, 24.36, 24.39, 24.41, 24.44, 24.46, 24.53, 24.6, 24.65, 24.69, 24.69, 24.7, 24.73, 24.75, 24.78, 24.88, 24.99, 25.11, 25.22, 25.3, 25.35, 25.41, 25.44, 25.48, 25.57, 25.61, 25.63, 25.65, 25.64, 25.66, 25.68, 25.69, 25.65, 25.62, 25.61, 25.54, 25.49, 25.42, 25.34, 25.29, 25.28], "ma200": [23.73, 23.72, 23.72, 23.72, 23.72, 23.71, 23.71, 23.71, 23.71, 23.71, 23.71, 23.71, 23.71, 23.71, 23.71, 23.71, 23.71, 23.71, 23.71, 23.71, 23.71, 23.7, 23.7, 23.7, 23.7, 23.7, 23.71, 23.71, 23.71, 23.72, 23.72, 23.72, 23.73, 23.73, 23.73, 23.73, 23.73, 23.73, 23.72, 23.73, 23.73, 23.73, 23.73, 23.73, 23.74, 23.73, 23.73, 23.73, 23.73, 23.73, 23.74, 23.74, 23.74, 23.75, 23.75, 23.75, 23.76, 23.77, 23.77, 23.78, 23.78, 23.79, 23.8, 23.82, 23.83, 23.85, 23.87, 23.88, 23.89, 23.91, 23.92, 23.94, 23.95, 23.97, 23.98, 23.99, 24.01, 24.02, 24.03, 24.03, 24.04, 24.05, 24.05, 24.06, 24.07, 24.08, 24.09, 24.1, 24.11, 24.13]}, "WLY": {"d": ["04/14", "04/15", "04/16", "04/17", "04/20", "04/21", "04/22", "04/23", "04/24", "04/27", "04/28", "04/29", "04/30", "05/01", "05/04", "05/05", "05/06", "05/07", "05/08", "05/11", "05/12", "05/13", "05/14", "05/15", "05/18", "05/19", "05/20", "05/21", "05/22", "05/26", "05/27", "05/28", "05/29", "06/01", "06/02", "06/03", "06/04", "06/05", "06/08", "06/09", "06/10", "06/11", "06/12", "06/15", "06/16", "06/17", "06/18", "06/22", "06/23", "06/24", "06/25", "06/26", "06/29", "06/30", "07/01", "07/02", "07/06", "07/07", "07/08", "07/09", "07/10", "07/13", "07/14", "07/15", "07/16", "07/17", "07/20", "07/21", "07/22", "07/23", "07/24", "07/27", "07/28", "07/29", "07/30", "07/31", "08/03", "08/04", "08/05", "08/06", "08/07", "08/10", "08/11", "08/12", "08/13", "08/14", "08/17", "08/18", "08/19", "08/20"], "o": [38.39, 39.59, 40.24, 40.44, 41.09, 41.42, 42.2, 41.26, 40.99, 40.71, 41.1, 40.75, 40.07, 40.99, 40.47, 39.94, 40.99, 40.6, 40.24, 41.1, 40.3, 39.49, 39.16, 39.27, 39.75, 41.68, 41.47, 40.84, 41.65, 41.99, 42.06, 40.93, 41.18, 42.01, 43.55, 43.48, 42.97, 43.75, 43.93, 43.7, 43.8, 44.09, 44.13, 43.22, 39.73, 45.01, 45.52, 46.38, 45.04, 44.22, 44.29, 45.42, 47.57, 46.47, 48.57, 50.84, 52.14, 52.53, 52.55, 49.56, 50.92, 50.74, 49.3, 49.36, 49.97, 50.8, 50.4, 49.41, 50.79, 49.53, 48.72, 50.57, 51.59, 54.65, 54.2, 52.55, 52.66, 52.41, 54.8, 54.24, 53.72, 51.64, 51.15, 49.12, 50.58, 52.3, 50.81, 51.37, 51.26, 51.46], "h": [39.52, 40.23, 40.52, 41.69, 41.56, 42.89, 42.49, 41.28, 41.32, 41.3, 41.31, 40.95, 40.99, 41.14, 41.22, 40.73, 41.04, 41.14, 41.3, 41.28, 40.39, 39.75, 39.54, 39.76, 41.41, 41.91, 41.69, 41.66, 42.25, 42.5, 42.85, 41.84, 42.14, 43.36, 44.15, 43.65, 44.19, 44.32, 44.12, 44.13, 44.64, 44.54, 44.39, 44.45, 44.81, 45.57, 47.86, 46.67, 45.28, 44.4, 46.34, 47.98, 48.24, 48.51, 51.35, 52.59, 52.88, 53.22, 52.92, 50.78, 52.29, 50.74, 50.32, 50.13, 51.33, 52.22, 50.82, 50.89, 51.68, 49.72, 49.82, 51.49, 54.58, 57.45, 55.1, 52.55, 54.14, 54.82, 55.1, 54.8, 54.68, 52.31, 51.79, 50.05, 51.92, 52.3, 51.23, 52.39, 52.05, 52.82], "l": [38.39, 39.54, 40.13, 40.44, 40.63, 41.22, 41.51, 40.37, 40.57, 40.62, 40.51, 40.29, 39.93, 40.56, 39.56, 39.92, 39.96, 40.34, 39.68, 39.63, 39.47, 38.21, 38.76, 38.95, 39.75, 41.24, 40.84, 40.22, 41.6, 41.96, 41.54, 40.64, 41.02, 41.58, 43.2, 42.36, 42.91, 43.47, 41.72, 43.22, 43.62, 43.5, 43.67, 42.78, 39.62, 42.87, 45.32, 44.61, 43.47, 42.84, 43.83, 45.29, 46.31, 46.15, 47.23, 50.19, 51.47, 51.49, 50.13, 48.61, 50.02, 48.45, 48.63, 48.65, 49.97, 50.12, 49.96, 49.41, 48.92, 48.61, 48.72, 50.33, 51.54, 54.53, 52.3, 51.14, 52.52, 52.41, 54.01, 53.1, 52.29, 51.17, 49.5, 49.02, 50.58, 51.26, 49.53, 50.94, 50.43, 51.48], "c": [39.51, 40.02, 40.3, 41.24, 41.39, 42.14, 41.59, 41.04, 40.79, 40.76, 40.73, 40.34, 40.65, 40.65, 39.91, 40.58, 40.39, 40.42, 41.11, 40.13, 39.78, 38.96, 39.15, 39.62, 41.38, 41.74, 41.08, 41.59, 42.05, 42.23, 41.56, 41.38, 41.79, 43.34, 43.81, 42.67, 43.78, 43.86, 43.54, 43.66, 44.09, 44.35, 43.87, 43.04, 44.78, 45.11, 46.38, 44.68, 43.64, 43.98, 45.25, 47.86, 46.84, 48.18, 50.66, 52.4, 52.17, 52.29, 50.3, 50.42, 50.31, 49.8, 49.27, 49.51, 50.94, 50.97, 49.98, 50.76, 49.47, 48.72, 49.55, 51.01, 54.3, 55.72, 52.49, 52.2, 53.1, 54.68, 54.46, 53.65, 52.33, 51.66, 49.58, 49.94, 51.82, 51.39, 50.8, 51.11, 51.97, 52.08], "ma20": [37.37, 37.57, 37.78, 38.05, 38.34, 38.63, 38.9, 39.11, 39.27, 39.46, 39.63, 39.77, 39.9, 40.01, 40.11, 40.24, 40.34, 40.45, 40.59, 40.69, 40.7, 40.65, 40.59, 40.51, 40.51, 40.49, 40.46, 40.49, 40.55, 40.63, 40.67, 40.72, 40.78, 40.91, 41.1, 41.21, 41.38, 41.55, 41.67, 41.85, 42.06, 42.33, 42.57, 42.74, 42.91, 43.08, 43.34, 43.5, 43.58, 43.67, 43.85, 44.17, 44.43, 44.67, 45.01, 45.5, 45.92, 46.34, 46.68, 47.01, 47.33, 47.6, 47.87, 48.19, 48.5, 48.79, 48.97, 49.28, 49.57, 49.81, 50.02, 50.18, 50.55, 50.93, 51.02, 51.01, 51.06, 51.17, 51.38, 51.54, 51.65, 51.74, 51.75, 51.78, 51.82, 51.84, 51.88, 51.9, 52.02, 52.19], "ma200": [35.29, 35.27, 35.26, 35.26, 35.26, 35.26, 35.27, 35.27, 35.27, 35.26, 35.26, 35.26, 35.26, 35.27, 35.28, 35.29, 35.31, 35.31, 35.33, 35.34, 35.35, 35.35, 35.36, 35.36, 35.39, 35.41, 35.43, 35.46, 35.48, 35.51, 35.53, 35.55, 35.57, 35.59, 35.62, 35.65, 35.67, 35.7, 35.72, 35.75, 35.77, 35.8, 35.83, 35.85, 35.88, 35.91, 35.95, 35.98, 36.01, 36.04, 36.07, 36.1, 36.14, 36.18, 36.23, 36.29, 36.35, 36.41, 36.47, 36.52, 36.58, 36.64, 36.69, 36.75, 36.81, 36.87, 36.93, 36.99, 37.04, 37.09, 37.15, 37.22, 37.31, 37.42, 37.5, 37.58, 37.67, 37.76, 37.85, 37.94, 38.02, 38.1, 38.16, 38.23, 38.31, 38.39, 38.46, 38.54, 38.62, 38.7]}, "LZB": {"d": ["04/14", "04/15", "04/16", "04/17", "04/20", "04/21", "04/22", "04/23", "04/24", "04/27", "04/28", "04/29", "04/30", "05/01", "05/04", "05/05", "05/06", "05/07", "05/08", "05/11", "05/12", "05/13", "05/14", "05/15", "05/18", "05/19", "05/20", "05/21", "05/22", "05/26", "05/27", "05/28", "05/29", "06/01", "06/02", "06/03", "06/04", "06/05", "06/08", "06/09", "06/10", "06/11", "06/12", "06/15", "06/16", "06/17", "06/18", "06/22", "06/23", "06/24", "06/25", "06/26", "06/29", "06/30", "07/01", "07/02", "07/06", "07/07", "07/08", "07/09", "07/10", "07/13", "07/14", "07/15", "07/16", "07/17", "07/20", "07/21", "07/22", "07/23", "07/24", "07/27", "07/28", "07/29", "07/30", "07/31", "08/03", "08/04", "08/05", "08/06", "08/07", "08/10", "08/11", "08/12", "08/13", "08/14", "08/17", "08/18", "08/19", "08/20"], "o": [33.36, 33.76, 33.93, 34.56, 35.57, 36.09, 36.36, 35.94, 35.51, 35.11, 35.99, 35.62, 34.87, 34.8, 34.54, 33.63, 35.03, 35.24, 35.38, 35.47, 35.34, 34.95, 34.31, 34.59, 34.34, 34.1, 33.88, 35.05, 36.61, 36.77, 37.25, 37.37, 37.74, 37.07, 36.79, 35.97, 36.97, 36.24, 36.42, 36.62, 37.54, 37.5, 39.09, 38.86, 37.99, 42.18, 40.3, 39.62, 39.99, 40.58, 41.54, 40.54, 41.17, 39.35, 39.95, 39.86, 40.21, 39.16, 38.6, 38.5, 39.33, 39.25, 38.84, 38.52, 40.11, 40.24, 40.08, 40.16, 39.4, 38.76, 38.98, 40.12, 40.88, 40.99, 41.24, 39.72, 40.03, 41.27, 41.59, 41.8, 40.76, 41.6, 41.39, 41.68, 41.54, 41.56, 41.22, 41.45, 33.7, 33.61], "h": [34.08, 34.1, 34.3, 36.17, 35.91, 36.56, 36.45, 36.09, 36.2, 35.75, 36.28, 35.92, 35.36, 35.11, 34.74, 34.82, 35.98, 35.77, 35.76, 35.47, 35.47, 35.2, 34.76, 34.84, 34.92, 34.3, 35.33, 36.92, 36.88, 37.22, 38.11, 38.19, 37.99, 38.12, 37.61, 36.51, 37.04, 36.73, 36.74, 37.67, 37.9, 39.07, 39.16, 39.3, 38.36, 44.9, 41.43, 40.85, 40.31, 42.34, 42.08, 41.41, 41.17, 40.39, 40.25, 40.1, 40.22, 39.62, 38.65, 39.65, 39.96, 39.46, 38.94, 40.23, 41.17, 40.91, 40.25, 40.43, 39.59, 39.01, 39.79, 40.86, 41.97, 41.28, 41.24, 40.14, 41.29, 41.97, 42.07, 41.8, 42.19, 42.45, 41.94, 41.8, 42.13, 41.93, 41.66, 42.09, 36.52, 34.61], "l": [33.21, 33.59, 33.78, 34.56, 35.28, 35.95, 35.69, 35.28, 35.14, 35.11, 35.52, 34.9, 34.51, 34.41, 33.26, 33.63, 34.73, 34.93, 35.12, 34.79, 34.89, 34.25, 34.13, 33.88, 33.9, 33.27, 33.64, 34.37, 36.35, 36.39, 37.09, 36.82, 37.11, 36.75, 36.43, 35.88, 36.3, 36.21, 36.05, 36.62, 37.08, 37.4, 38.37, 37.76, 35.06, 39.92, 39.32, 39.36, 39.61, 40.58, 40.59, 40.37, 39.7, 39.09, 39.15, 39.26, 38.92, 38.84, 37.63, 38.21, 39.15, 38.65, 38.14, 38.52, 40.11, 39.8, 39.33, 39.04, 38.94, 38.16, 38.84, 40.01, 40.27, 40.39, 40.06, 39.32, 40.03, 41.11, 41.41, 40.63, 40.76, 41.21, 41.11, 40.79, 41.06, 41.2, 41.03, 40.83, 33.23, 33.12], "c": [33.89, 34.0, 33.89, 35.64, 35.87, 36.15, 35.81, 35.67, 35.17, 35.7, 35.9, 34.98, 34.52, 34.91, 33.33, 34.36, 35.14, 35.33, 35.5, 35.21, 35.27, 34.25, 34.7, 34.08, 34.33, 33.85, 35.32, 36.54, 36.41, 37.04, 37.33, 37.9, 37.34, 37.14, 36.43, 36.27, 36.45, 36.33, 36.23, 37.33, 37.36, 38.99, 38.49, 37.78, 35.06, 40.24, 39.66, 39.99, 40.3, 41.85, 40.8, 40.95, 39.95, 40.12, 39.77, 39.91, 39.4, 39.09, 38.42, 39.31, 39.18, 38.77, 38.58, 39.93, 40.56, 39.87, 39.92, 39.22, 39.3, 38.84, 39.68, 40.38, 41.3, 40.93, 40.13, 39.38, 41.0, 41.73, 41.45, 40.64, 42.14, 41.4, 41.54, 41.06, 41.72, 41.85, 41.52, 40.83, 33.91, 33.65], "ma20": [32.34, 32.4, 32.47, 32.64, 32.86, 33.04, 33.22, 33.37, 33.51, 33.71, 33.92, 34.07, 34.21, 34.39, 34.46, 34.61, 34.74, 34.86, 34.96, 35.05, 35.12, 35.13, 35.17, 35.09, 35.01, 34.9, 34.88, 34.92, 34.98, 35.05, 35.12, 35.27, 35.41, 35.52, 35.67, 35.77, 35.83, 35.88, 35.92, 36.03, 36.13, 36.37, 36.56, 36.74, 36.78, 37.1, 37.32, 37.49, 37.68, 37.92, 38.1, 38.25, 38.38, 38.53, 38.7, 38.88, 39.03, 39.16, 39.27, 39.37, 39.46, 39.45, 39.46, 39.56, 39.84, 39.82, 39.83, 39.8, 39.75, 39.59, 39.54, 39.51, 39.58, 39.62, 39.64, 39.61, 39.69, 39.82, 39.97, 40.04, 40.19, 40.32, 40.47, 40.52, 40.58, 40.68, 40.76, 40.84, 40.57, 40.31], "ma200": [35.2, 35.19, 35.18, 35.17, 35.15, 35.14, 35.13, 35.12, 35.1, 35.08, 35.07, 35.06, 35.05, 35.04, 35.02, 35.01, 35.0, 34.99, 34.97, 34.97, 34.95, 34.94, 34.93, 34.92, 34.92, 34.92, 34.92, 34.92, 34.93, 34.93, 34.94, 34.95, 34.96, 34.95, 34.94, 34.94, 34.93, 34.92, 34.94, 34.95, 34.96, 34.98, 34.99, 35.0, 35.0, 35.02, 35.04, 35.07, 35.09, 35.13, 35.16, 35.19, 35.22, 35.25, 35.28, 35.31, 35.34, 35.37, 35.4, 35.43, 35.46, 35.49, 35.51, 35.54, 35.57, 35.6, 35.64, 35.67, 35.69, 35.72, 35.75, 35.79, 35.84, 35.88, 35.93, 35.97, 36.02, 36.07, 36.12, 36.16, 36.22, 36.26, 36.31, 36.35, 36.4, 36.45, 36.49, 36.54, 36.55, 36.56]}}, "watchlist": [{"ticker": "ABBV", "name": "AbbVie", "added": "2026-08-12", "entry_price": 247.7, "stop": 236.376, "strategy": "눌림목", "note": "2026-08-13 실제 매수 247.70", "warnings": [], "close": 261.8299865722656, "change_pct": 5.7, "held_days": 6, "peak": 266.9700012207031, "from_peak_pct": -1.93, "stop_gap_pct": 9.72}], "sp500_watch": [{"ticker": "SPCX", "name": "Space Exploration Technologies Corp. Class A Common Stock", "market_cap": 1495270258323.0, "market_cap_b": 1495.3, "exceeds_requirement_pct": 6487.1, "note": "시총 요건 충족 (다른 요건·위원회 재량은 별개)"}, {"ticker": "ASML", "name": "ASML Holding NV", "market_cap": 635785369750.9766, "market_cap_b": 635.8, "exceeds_requirement_pct": 2700.8, "note": "시총 요건 충족 (다른 요건·위원회 재량은 별개)"}, {"ticker": "ARM", "name": "Arm Holdings plc American Depositary Shares", "market_cap": 283389439859.0979, "market_cap_b": 283.4, "exceeds_requirement_pct": 1148.4, "note": "시총 요건 충족 (다른 요건·위원회 재량은 별개)"}, {"ticker": "SHOP", "name": "Shopify Inc. Class A subordinate voting shares", "market_cap": 164646413225.80518, "market_cap_b": 164.6, "exceeds_requirement_pct": 625.3, "note": "시총 요건 충족 (다른 요건·위원회 재량은 별개)"}, {"ticker": "PDD", "name": "PDD Holdings Inc. American Depositary Shares", "market_cap": 120775187628.76936, "market_cap_b": 120.8, "exceeds_requirement_pct": 432.0, "note": "시총 요건 충족 (다른 요건·위원회 재량은 별개)"}, {"ticker": "MELI", "name": "Mercado Libre, Inc", "market_cap": 92255689477.59033, "market_cap_b": 92.3, "exceeds_requirement_pct": 306.4, "note": "시총 요건 충족 (다른 요건·위원회 재량은 별개)"}, {"ticker": "ALAB", "name": "Astera Labs, Inc. Common Stock", "market_cap": 48426169043.13614, "market_cap_b": 48.4, "exceeds_requirement_pct": 113.3, "note": "시총 요건 충족 (다른 요건·위원회 재량은 별개)"}, {"ticker": "CCEP", "name": "Coca-Cola Europacific Partners plc Ordinary Shares", "market_cap": 48076636204.04605, "market_cap_b": 48.1, "exceeds_requirement_pct": 111.8, "note": "시총 요건 충족 (다른 요건·위원회 재량은 별개)"}, {"ticker": "NBIS", "name": "Nebius Group N.V. Class A Ordinary Shares", "market_cap": 47702393928.457275, "market_cap_b": 47.7, "exceeds_requirement_pct": 110.1, "note": "시총 요건 충족 (다른 요건·위원회 재량은 별개)"}, {"ticker": "FER", "name": "Ferrovial N.V. Ordinary Shares", "market_cap": 44981754437.57921, "market_cap_b": 45.0, "exceeds_requirement_pct": 98.2, "note": "시총 요건 충족 (다른 요건·위원회 재량은 별개)"}, {"ticker": "TRI", "name": "Thomson Reuters Corporation Common Shares", "market_cap": 42676037637.667564, "market_cap_b": 42.7, "exceeds_requirement_pct": 88.0, "note": "시총 요건 충족 (다른 요건·위원회 재량은 별개)"}, {"ticker": "RKLB", "name": "Rocket Lab Corporation Common Stock", "market_cap": 41825366976.93634, "market_cap_b": 41.8, "exceeds_requirement_pct": 84.3, "note": "시총 요건 충족 (다른 요건·위원회 재량은 별개)"}, {"ticker": "CRWV", "name": "CoreWeave, Inc. Class A Common Stock", "market_cap": 38620925292.82457, "market_cap_b": 38.6, "exceeds_requirement_pct": 70.1, "note": "시총 요건 충족 (다른 요건·위원회 재량은 별개)"}, {"ticker": "ALNY", "name": "Alnylam Pharmaceuticals, Inc.", "market_cap": 37169899508.303925, "market_cap_b": 37.2, "exceeds_requirement_pct": 63.7, "note": "시총 요건 충족 (다른 요건·위원회 재량은 별개)"}, {"ticker": "MSTR", "name": "Strategy Inc Common Stock Class A", "market_cap": 36038781563.68351, "market_cap_b": 36.0, "exceeds_requirement_pct": 58.8, "note": "시총 요건 충족 (다른 요건·위원회 재량은 별개)"}, {"ticker": "ILMN", "name": "Illumina, Inc.", "market_cap": 29476267108.154297, "market_cap_b": 29.5, "exceeds_requirement_pct": 29.9, "note": "시총 요건 충족 (다른 요건·위원회 재량은 별개)"}, {"ticker": "FTI", "name": "TechnipFMC", "market_cap": 28598888410.225792, "market_cap_b": 28.6, "exceeds_requirement_pct": 26.0, "note": "시총 요건 충족 (다른 요건·위원회 재량은 별개)"}, {"ticker": "TWLO", "name": "Twilio", "market_cap": 28571429145.0, "market_cap_b": 28.6, "exceeds_requirement_pct": 25.9, "note": "시총 요건 충족 (다른 요건·위원회 재량은 별개)"}, {"ticker": "CRS", "name": "Carpenter Technology", "market_cap": 26364179196.834473, "market_cap_b": 26.4, "exceeds_requirement_pct": 16.1, "note": "시총 요건 충족 (다른 요건·위원회 재량은 별개)"}, {"ticker": "UTHR", "name": "United Therapeutics", "market_cap": 26131171922.53601, "market_cap_b": 26.1, "exceeds_requirement_pct": 15.1, "note": "시총 요건 충족 (다른 요건·위원회 재량은 별개)"}, {"ticker": "CW", "name": "Curtiss-Wright", "market_cap": 25098195241.167725, "market_cap_b": 25.1, "exceeds_requirement_pct": 10.6, "note": "시총 요건 충족 (다른 요건·위원회 재량은 별개)"}, {"ticker": "ATI", "name": "ATI Inc.", "market_cap": 24280818121.955185, "market_cap_b": 24.3, "exceeds_requirement_pct": 7.0, "note": "시총 요건 충족 (다른 요건·위원회 재량은 별개)"}, {"ticker": "OKTA", "name": "Okta, Inc.", "market_cap": 23795966978.65158, "market_cap_b": 23.8, "exceeds_requirement_pct": 4.8, "note": "시총 요건 충족 (다른 요건·위원회 재량은 별개)"}, {"ticker": "ROIV", "name": "Roivant Sciences", "market_cap": 23642416786.686344, "market_cap_b": 23.6, "exceeds_requirement_pct": 4.2, "note": "시총 요건 충족 (다른 요건·위원회 재량은 별개)"}, {"ticker": "XPO", "name": "XPO, Inc.", "market_cap": 23409202585.070923, "market_cap_b": 23.4, "exceeds_requirement_pct": 3.1, "note": "시총 요건 충족 (다른 요건·위원회 재량은 별개)"}, {"ticker": "BURL", "name": "Burlington Stores", "market_cap": 23359741220.11499, "market_cap_b": 23.4, "exceeds_requirement_pct": 2.9, "note": "시총 요건 충족 (다른 요건·위원회 재량은 별개)"}, {"ticker": "P", "name": "Everpure", "market_cap": 23019041541.0, "market_cap_b": 23.0, "exceeds_requirement_pct": 1.4, "note": "시총 요건 충족 (다른 요건·위원회 재량은 별개)"}, {"ticker": "WWD", "name": "Woodward, Inc.", "market_cap": 22964427086.68283, "market_cap_b": 23.0, "exceeds_requirement_pct": 1.2, "note": "시총 요건 충족 (다른 요건·위원회 재량은 별개)"}, {"ticker": "MTZ", "name": "MasTec", "market_cap": 22711514426.56018, "market_cap_b": 22.7, "exceeds_requirement_pct": 0.1, "note": "시총 요건 충족 (다른 요건·위원회 재량은 별개)"}], "companies": {"AAPL": {"industry": "전화 및 소형 장치", "name_kr": "애플", "summary": "애플은 스마트폰, 개인용 컴퓨터, 태블릿, 웨어러블 및 액세서리를 설계, 제조 및 판매하고 다양한 관련 서비스를 판매한다"}, "ABBV": {"industry": "제약", "name_kr": "애브비", "summary": "다각화된 글로벌 연구 기반 바이오 제약 회사다"}, "AMG": {"industry": "투자 관리 및 펀드 운영", "name_kr": "어필리에이티드 매니저스 그룹", "summary": "글로벌 독립 투자 관리 회사다. 회사는 다양한 파트너 소유 투자 회사(계열사라고 함)에 투자하는 데 주력한다"}, "AMN": {"industry": "의료 시설 및 서비스", "name_kr": "AMN 헬스케어 서비스", "summary": "미국 전역의 의료 기관을 위한 토탈 인재 솔루션을 제공하는 기업이다"}, "AMZN": {"industry": "백화점", "name_kr": "아마존닷컴", "summary": "아마존닷컴은 고객에게 다양한 제품과 서비스를 제공한다"}, "ARWR": {"industry": "생명 공학 및 의학 연구", "name_kr": "애로우헤드 파마슈티컬스", "summary": "난치성 질환을 유발하는 유전자를 억제하여 난치성 질환을 치료하는 의약품을 개발한다"}, "AXTA": {"industry": "상품 화학", "name_kr": "엑솔타 코팅 시스템즈", "summary": "코팅 시스템의 제조, 마케팅 및 유통업체다"}, "BALL": {"industry": "용기(종이 제외) 및 포장재", "name_kr": "볼", "summary": "음료, 퍼스널 케어 및 가정용품 고객을 위한 지속 가능한 알루미늄 포장 솔루션을 공급한다"}, "BBY": {"industry": "컴퓨터 및 전자 제품 소매", "name_kr": "베스트 바이", "summary": "개인화 및 인간화 기술 솔루션에 종사한다"}, "BCC": {"industry": "건설 자재 및 비품", "name_kr": "보이시 캐스케이드", "summary": "북미에서 엔지니어링 목재 제품(EWP)과 합판을 생산하고 미국 내 건축 제품을 도매로 유통하는 회사다"}, "CARG": {"industry": "온라인 서비스", "name_kr": "카구루스", "summary": "카구루스는 차량 매매를 위한 다국적 온라인 자동차 플랫폼으로, 디지털 소매 솔루션과 CarOffer 디지털 도매 플랫폼을 모두 제공한다"}, "CTAS": {"industry": "경영 지원 서비스", "name_kr": "신타스", "summary": "신타스 코퍼레이션은 원단을 사용하여 유니폼 프로그램을 개발한다"}, "CWST": {"industry": "환경 서비스 및 장비", "name_kr": "카셀라 웨이스트 시스템즈", "summary": "수직적으로 통합된 지역 고형 폐기물 서비스 회사다"}, "EPRT": {"industry": "복합부동산 REITs", "name_kr": "에센셜 프로퍼티 리얼티", "summary": "내부적으로 관리되는 REIT다. 주로 서비스 지향 또는 경험 기반 사업을 운영하는 이 회사에 장기적으로 순 임대되는 단일 임차인 부동산을 소유 및 관리한다"}, "F": {"industry": "자동차 및 트럭 제조", "name_kr": "포드 모터", "summary": "자동차 회사다. 이 회사는 Ford 트럭, 스포츠 유틸리티 차량, 상용 밴 및 승용차, Lincoln 고급 차량과 커넥티드 서비스를 개발 및 제공한다"}, "FAF": {"industry": "손해보험", "name_kr": "퍼스트 아메리칸 파이낸셜", "summary": "자회사를 통해 소유권 보험, 결제 서비스 및 기타 금융 서비스 및 위험 솔루션을 제공하는 사업에 종사한다"}, "FCPT": {"industry": "상업용 REITs", "name_kr": "포 코너스 프로퍼티 트러스트", "summary": "레스토랑 및 소매업에 사용할 부동산을 소유, 인수 및 임대하는 REIT다"}, "FFBC": {"industry": "은행", "name_kr": "퍼스트 파이낸셜 뱅코프", "summary": "중견 규모의 지역 은행 지주 회사다. 전액 출자 자회사인 First Financial Bank(은행)를 통해 상업 은행 및 기타 은행 및 은행 관련 활동에 종사한다"}, "GE": {"industry": "항공우주 및 방위", "name_kr": "GE 에어로스페이스", "summary": "GE Aerospace로 사업을 운영하는 글로벌 항공우주 추진, 서비스 및 시스템 회사다"}, "GM": {"industry": "자동차 및 트럭 제조", "name_kr": "제너럴 모터스", "summary": "제너럴 모터스는 트럭, 크로스오버, 자동차 및 자동차 부품을 설계, 제작 및 판매하며 전 세계에 소프트웨어 지원 서비스 및 구독을 제공한다"}, "HIW": {"industry": "상업용 REITs", "name_kr": "하이우즈 프로퍼티스", "summary": "REIT다. 주로 애틀랜타, 샬럿, 댈러스, 내슈빌, 올랜도, 롤리, 리치몬드, 탬파의 최고의 비즈니스 지구(BBD)에서 부동산을 소유, 개발, 인수, 임대 및 관리하는…"}, "HTO": {"industry": "수자원 유틸리티", "name_kr": "H2O 아메리카", "summary": "상하수도 서비스를 제공하는 상하수도 유틸리티 회사다"}, "HWM": {"industry": "항공우주 및 방위", "name_kr": "하우멧 에어로스페이스", "summary": "항공우주 및 운송 산업을 위한 고급 엔지니어링 솔루션을 제공하는 업체다"}, "IFF": {"industry": "식품 가공", "name_kr": "인터내셔널 플레이버스 & 프레그런스", "summary": "내부적으로 관리되는 REIT다. 규제 대상인 대마초 시설을 위해 주에서 허가받은 운영자에게 임대하는 특수 산업 자산의 취득, 소유 및 관리에 중점을 둔다"}, "LAUR": {"industry": "기타 교육 서비스 제공", "name_kr": "로리어트 에듀케이션", "summary": "멕시코와 페루에서 학위를 수여하는 고등 교육 기관 포트폴리오(Laureate International Universities 네트워크)를 운영한다"}, "LGIH": {"industry": "주택 건설", "name_kr": "LGI 홈스", "summary": "주택 건설 산업에 주력한다. 21개 주의 약 36개 시장에서 주택을 설계, 건설 및 판매한다"}, "LZB": {"industry": "가정용 가구", "name_kr": "레이지보이", "summary": "세계적인 리클라이닝 체어 생산업체이자 미국 내 주거용 가구 제조/유통업체다"}, "MCO": {"industry": "전문 정보 서비스", "name_kr": "무디스", "summary": "글로벌 리스크 평가 회사다. 회사의 데이터, 분석 솔루션 및 인사이트는 의사결정권자가 기회를 파악하고 다른 기업과의 비즈니스에서 발생하는 위험을 관리하는 것을 지원한다"}, "MEDP": {"industry": "생명 공학 및 의학 연구", "name_kr": "메드페이스 홀딩스", "summary": "임상 연구 기반 의약품 및 의료 기기 개발 서비스를 제공하는 글로벌 기업이다"}, "MOH": {"industry": "의료 관리", "name_kr": "몰리나 헬스케어", "summary": "메디케이드 및 메디케어 프로그램과 주 보험 마켓플레이스를 통해 관리형 의료 서비스를 제공하는 업체다"}, "MSM": {"industry": "산업용 기계 및 장비", "name_kr": "MSC 인더스트리얼 다이렉트", "summary": "다양한 금속 가공 및 유지보수, 수리 및 운영(MRO) 제품 및 서비스를 제공하는 북미 유통업체다"}, "MTN": {"industry": "여가 및 오락시설", "name_kr": "베일 리조트", "summary": "1) 북미 전역의 Vail Mountain, Breckenridge, Park City Mountain, Whistler Blackcomb, Stowe 및 32개의 기타…"}, "NWS": {"industry": "소비자 출판", "name_kr": "뉴스 코퍼레이션 Class B", "summary": "다각화된 미디어 및 정보 서비스 회사다. 사업 부문은 다음과 같다"}, "NWSA": {"industry": "소비자 출판", "name_kr": "뉴스 코퍼레이션 Class A", "summary": "다각화된 미디어 및 정보 서비스 회사다. 사업 부문은 다음과 같다"}, "NX": {"industry": "건설 자재 및 비품", "name_kr": "콰넥스 빌딩 프로덕츠", "summary": "콰넥스 빌딩 프로덕트 코퍼레이션은 건축 제품 산업의 주문자 상표 부착 생산자(OEM)를 위한 부품을 제조한다"}, "RCUS": {"industry": "생명 공학 및 의학 연구", "name_kr": "아쿠스 바이오사이언스", "summary": "암 환자를 위한 차별화된 분자 및 병용 요법을 개발하는 임상 단계의 바이오 제약 회사다"}, "RELY": {"industry": "경영 지원 서비스", "name_kr": "리미틀리 글로벌", "summary": "전 세계 170여 개국의 이민자와 그 가족을 위한 디지털 금융 서비스 제공업체다"}, "SJM": {"industry": "식품 가공", "name_kr": "J. M. 스머커", "summary": "전 세계적으로 브랜드 식음료 제품의 제조 및 마케팅에 종사하고 있다"}, "SW": {"industry": "종이 포장재", "name_kr": "스머핏 웨스트락", "summary": "아일랜드 기반의 종이 포장재 공급업체다. 이 회사는 유럽과 미주 지역에서 사업을 운영하는 통합 제지 및 판지 제조업체 및 컨버터다"}, "TFIN": {"industry": "은행", "name_kr": "트라이엄프 파이낸셜", "summary": "금융 지주 회사다. 은행, 팩터링 및 결제 부문으로 구성된다"}, "TNL": {"industry": "호텔, 모텔 및 크루즈 라인", "name_kr": "트래블 앤 레저", "summary": "회원제 및 레저 여행 회사다. 휴가 오너십과 여행 및 멤버십 부문이 있다"}, "TPR": {"industry": "의류 및 액세서리 소매", "name_kr": "태피스트리", "summary": "럭셔리 액세서리 및 라이프스타일 브랜드의 글로벌 하우스다"}, "UNP": {"industry": "지상 화물 및 물류", "name_kr": "유니온 퍼시픽", "summary": "유니온 퍼시픽은 미국의 철도 운영 회사다. 주요 운영 회사인 Union Pacific Railroad Company(UPRR)를 통해 운영된다"}, "VIRT": {"industry": "투자 은행 및 중개 서비스", "name_kr": "버튜 파이낸셜", "summary": "기술을 활용하여 고객에게 실행 서비스와 데이터, 분석 및 연결 상품을 제공하고 글로벌 시장에 유동성을 제공하는 금융 서비스 회사다"}, "VSXY": {"industry": "의류 및 액세서리 소매", "name_kr": "빅토리아 시크릿", "summary": "Victoria's Secret, Victoria's Secret PINK(PINK), Adore Me 브랜드로 판매되는 여성 속옷 및 기타 의류와 뷰티 제품을…"}, "VTR": {"industry": "특수 REITs", "name_kr": "벤타스", "summary": "REIT다. 북미와 영국에 위치한 노인 주택 커뮤니티, 외래 환자 의료 건물, 연구 센터, 병원 및 의료 시설을 포함한 포트폴리오를 보유하고 있다"}, "WLY": {"industry": "소비자 출판", "name_kr": "존 윌리 앤 손 Class A", "summary": "출판사로, 콘텐츠, 서비스, 플랫폼 및 지식 네트워크를 연구자, 학생, 강사, 전문가, 기관, 기업 등의 고객 및 파트너의 요구를 충족하도록 맞춤화해 제공한다"}, "WST": {"industry": "의료 장비, 물품 및 유통", "name_kr": "웨스트 파마슈티컬 서비시즈", "summary": "주사제 및 헬스케어 제품을 위한 기술적으로 진보된 통합 봉쇄 및 전달 시스템을 설계하고 생산하는 글로벌 제조업체다"}, "BG": {"name_kr": "번지 글로벌", "industry": "식품 가공", "summary": "글로벌 농업 및 식품 회사다. 농업 사업, 정제 및 특수유, 제분, 설탕 및 바이오에너지의 4개 부문으로 사업을 운영한다"}, "GEN": {"name_kr": "젠 디지털", "industry": "소프트웨어", "summary": "글로벌 기업이다. 이 회사는 Norton, Avast, LifeLock, Avira, AVG, ReputationDefender 및 CCleaner를 포함한 다양한…"}, "WELL": {"name_kr": "웰타워", "industry": "특수 REITs", "summary": "부동산 투자 신탁(REIT)이다. 회사는 미국, 캐나다, 영국(UK) 시장에 집중된 부동산에 대한 지분을 소유하고 있으며, 노인 주택과 급성기 이후 커뮤니티 및 외래…"}, "THG": {"name_kr": "하노버 인슈어런스 그룹", "industry": "손해보험", "summary": "손해보험 상품 및 서비스 사업을 운영하는 지주 회사다"}}};
+
+const regime = DATA.market_regime || {};
+function fmtIdx(bull, close) {
+  if (bull === null || bull === undefined) return `<span style="color:var(--ink-faint)">N/A</span>`;
+  const cls = bull ? "idx-up" : "idx-down";
+  const arrow = bull ? "▲" : "▼";
+  const closeTxt = close ? close.toLocaleString(undefined,{maximumFractionDigits:1}) : "-";
+  return `<span class="${cls}">${arrow} ${closeTxt}</span>`;
+}
+document.getElementById("brandName").textContent = MARKET.brand;
+document.getElementById("statPills").innerHTML =
+  `<span class="stat-pill">RUN <b>${DATA.run_date}</b></span>` +
+  `<span class="stat-pill">평가 <b>${DATA.total_scanned}</b><span style="color:var(--ink-faint)"> / ${DATA.universe_size || DATA.total_scanned}</span></span>` +
+  MARKET.indices.map(ix =>
+    `<span class="stat-pill">${ix.label} ${fmtIdx(regime[ix.key + "_bullish"], regime[ix.key + "_close"])}</span>`
+  ).join("");
+
+const regimeBanner = document.getElementById("regimeBanner");
+if (regime.overall_bullish === null || regime.overall_bullish === undefined) {
+  regimeBanner.innerHTML = `<div class="regime-banner regime-unknown"><span class="regime-icon">📊</span> 시장국면 확인 불가 — 지수 데이터 부족 또는 조회 실패</div>`;
+} else if (regime.overall_bullish) {
+  regimeBanner.innerHTML = `<div class="regime-banner regime-bull"><span class="regime-icon">🟢</span> <b>강세 국면</b> — 신규 진입 검토 가능</div>`;
+} else {
+  regimeBanner.innerHTML = `<div class="regime-banner regime-bear"><span class="regime-icon">🔵</span> <b>약세 국면</b> — 신규 진입 신중히 (관망 권장)</div>`;
+}
+
+/* ---------- ⭐ 오늘의 TOP 후보 ----------
+   신호가 40개 떠도 다 살 수는 없으니, 점수를 매겨 상위 몇 개를 먼저 보여준다.
+   점수 = 추세건강도 25% + RS 20% + 거래대금힘 15% + 마감강세 15% + 신고가근접 15% + 섹터동반 10%
+   (약세 국면이거나 240일선 아래면 감점) */
+const topPicks = DATA.top_picks || [];
+const num = (v, d = 0) =>
+  (v === null || v === undefined) ? "-" : v.toLocaleString(undefined, {maximumFractionDigits: d, minimumFractionDigits: d});
+/* 가격은 단위가 달라서 자릿수를 자동으로 맞춘다 — 미국 주가($32.59)는 소수점 2자리,
+   원화(71,200원)는 정수. 그러지 않으면 $32.59가 33으로 반올림돼 손절가 계산이 틀려 보인다. */
+const price = (v) => num(v, (v !== null && v !== undefined && Math.abs(v) < 1000) ? 2 : 0);
+const CUR = MARKET.currency;   /* 미국장 "$", 한국장은 기호 없음 */
+
+/* ---------- 종목을 누르면 펼쳐지는 미니 차트 ----------
+   숫자로 "손절 13,430"만 보는 것과 차트에 그 선이 그어져 있는 걸 보는 건 판단의 질이 다르다.
+   그래서 손절가·박스·목표선을 캔들 위에 직접 그린다.
+   캔들과 이동평균은 파이썬이 미리 계산해 DATA.charts에 넣어준다 (인터넷 없이도 그려짐). */
+const CHARTS = DATA.charts || {};
+
+/* 티커만 보면 무슨 회사인지 알 수 없다. 한글 회사명과 한 줄 설명을 붙인다.
+   (네이버 기업개요. 못 받아온 종목은 조용히 빈 칸으로 둔다) */
+const COMPANIES = DATA.companies || {};
+
+/* 표에는 한글명과 업종만 (19줄짜리 표에 설명까지 넣으면 한 행이 7줄이 되어
+   한눈에 훑을 수가 없다). 자세한 설명은 TOP 카드에서만 보여준다. */
+function companyLine(ticker, full) {
+  const c = COMPANIES[ticker];
+  if (!c) return "";
+  const head = [c.name_kr, c.industry].filter(Boolean).join(" · ");
+  const body = full ? [head, c.summary].filter(Boolean).join(" — ") : head;
+  return body ? `<div class="company">${esc(body)}</div>` : "";
+}
+/* 손익비 — "1 걸고 몇 먹는 자리인가". 숫자만 보면 감이 안 오니 실제 %도 같이 쓴다.
+   돌파는 목표를 정하지 않는 전략이라 값이 없다. */
+function rrText(r, full) {
+  if (r.risk_reward === null || r.risk_reward === undefined) return "목표 미정";
+  if (!full) return `${num(r.risk_reward, 2)}배`;   // 카드의 지표 칸은 좁다
+  const lose = (r.close - r.stop_loss) / r.close * 100;
+  return `${num(r.risk_reward, 2)}배 — ${num(lose, 1)}% 걸고 ${num(lose * r.risk_reward, 1)}% 먹기`;
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, m => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[m]));
+}
+const SVGNS = "http://www.w3.org/2000/svg";
+
+function svgEl(tag, attrs, text) {
+  const n = document.createElementNS(SVGNS, tag);
+  for (const k in attrs) n.setAttribute(k, attrs[k]);
+  if (text !== undefined) n.textContent = text;
+  return n;
+}
+
+/* 이 종목의 전략이 제시한 가격선들. 종류마다 뜻이 달라서 색과 이름을 따로 준다. */
+function priceLines(row) {
+  const lines = [];
+  if (row.stop_loss) lines.push({v: row.stop_loss, color: "var(--down)", label: "손절", dash: "4 3"});
+  if (row.box_top)   lines.push({v: row.box_top,   color: "var(--up)",   label: "박스상단", dash: "4 3"});
+  if (row.box_low)   lines.push({v: row.box_low,   color: "var(--accent)", label: "박스하단", dash: "4 3"});
+  if (row.target_ma) lines.push({v: row.target_ma, color: "var(--up)",   label: "목표", dash: "4 3"});
+  return lines;
+}
+
+function buildChart(ticker, row) {
+  const d = CHARTS[ticker];
+  const box = document.createElement("div");
+  box.className = "chart-box";
+  if (!d) { box.textContent = "차트 데이터가 없어요."; return box; }
+  // 표가 가로로 스크롤돼도 차트는 화면 왼쪽에 붙어 있게 (스크롤해서 찾아가지 않아도 되도록)
+  box.style.width = ((document.querySelector(".table-card > .core")?.clientWidth || 720) - 34) + "px";
+
+  const svg = svgEl("svg", {role: "img", "aria-label": `${ticker} 최근 ${d.c.length}일 캔들차트`});
+
+  // viewBox 폭을 '화면에 실제로 보이는 폭'에 맞춘다.
+  // 표는 가로 스크롤되지만 차트까지 따라 나가면 오른쪽 가격 눈금이 잘려서 안 보이고,
+  // 고정폭(720)으로 그리면 폰에서 축소돼 9px 글씨가 6px이 되어 아예 안 읽힌다.
+  const avail = (document.querySelector(".table-card > .core")?.clientWidth || 720) - 34;
+  const W = Math.max(300, Math.round(avail));
+  const H = W < 470 ? 220 : 250;
+  const padL = 8, padR = 52, padT = 10, padB = 20;
+  const n = d.c.length;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+
+  const lines = priceLines(row);
+  const vals = [...d.h, ...d.l, ...d.ma20, ...d.ma200, ...lines.map(l => l.v)]
+                 .filter(v => v !== null && v !== undefined);
+  const lo = Math.min(...vals), hi = Math.max(...vals);
+  const span = (hi - lo) || 1;
+  const y = (v) => padT + plotH * (1 - (v - lo) / span);
+  const x = (i) => padL + plotW * (i + 0.5) / n;
+  const cw = Math.max(1.5, (plotW / n) * 0.62);
+
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+
+  // 가로 눈금 3개 — 데이터보다 뒤로 물러나 있어야 한다
+  [lo, (lo + hi) / 2, hi].forEach(v => {
+    svg.appendChild(svgEl("line", {x1: padL, y1: y(v), x2: W - padR, y2: y(v),
+                                   stroke: "rgba(255,255,255,0.05)", "stroke-width": 1}));
+    svg.appendChild(svgEl("text", {x: W - padR + 5, y: y(v) + 3, class: "c-lbl"}, price(v)));
+  });
+
+  // 캔들 — 한국 관행대로 오르면 빨강, 내리면 파랑
+  for (let i = 0; i < n; i++) {
+    if (d.c[i] === null) continue;
+    const up = d.c[i] >= d.o[i];
+    const color = up ? "var(--up)" : "var(--down)";
+    svg.appendChild(svgEl("line", {x1: x(i), y1: y(d.h[i]), x2: x(i), y2: y(d.l[i]),
+                                   stroke: color, "stroke-width": 1}));
+    const top = y(Math.max(d.o[i], d.c[i]));
+    const h = Math.max(1, Math.abs(y(d.o[i]) - y(d.c[i])));
+    svg.appendChild(svgEl("rect", {x: x(i) - cw / 2, y: top, width: cw, height: h, fill: color}));
+  }
+
+  // 이동평균선
+  const path = (series, color, width) => {
+    const pts = series.map((v, i) => v === null ? null : `${x(i)},${y(v)}`).filter(Boolean);
+    if (pts.length < 2) return;
+    svg.appendChild(svgEl("polyline", {points: pts.join(" "), fill: "none",
+                                       stroke: color, "stroke-width": width, "stroke-linejoin": "round"}));
+  };
+  path(d.ma200, "rgba(255,255,255,0.28)", 1.5);
+  path(d.ma20, "var(--accent)", 1.5);
+
+  // 전략이 제시한 가격선 (손절·박스·목표)
+  lines.forEach(l => {
+    if (l.v < lo || l.v > hi) return;
+    svg.appendChild(svgEl("line", {x1: padL, y1: y(l.v), x2: W - padR, y2: y(l.v),
+                                   stroke: l.color, "stroke-width": 1.4, "stroke-dasharray": l.dash}));
+    svg.appendChild(svgEl("text", {x: W - padR + 5, y: y(l.v) + 3, class: "c-tag",
+                                   fill: l.color}, l.label));
+  });
+
+  // 날짜는 양 끝과 가운데만 (모든 캔들에 날짜를 달면 글자가 겹쳐서 아무것도 안 읽힌다)
+  [0, Math.floor(n / 2), n - 1].forEach((i, k) => {
+    svg.appendChild(svgEl("text", {
+      x: x(i), y: H - 6, class: "c-lbl",
+      "text-anchor": k === 0 ? "start" : (k === 2 ? "end" : "middle"),
+    }, d.d[i]));
+  });
+
+  box.appendChild(svg);
+
+  const legend = document.createElement("div");
+  legend.className = "chart-legend";
+  legend.innerHTML =
+    `<span><i style="border-color:var(--accent)"></i>20일선</span>` +
+    `<span><i style="border-color:rgba(255,255,255,0.28)"></i>200일선</span>` +
+    lines.map(l => `<span><i style="border-color:${l.color};border-top-style:dashed"></i>${l.label}</span>`).join("") +
+    // 화살표를 글자 옆에 그냥 두지 않고 동그란 자리에 앉힌다 — 누를 곳이 명확해진다
+    `<a class="chart-open-link" target="_blank" rel="noopener" href="${MARKET.chartUrl}${ticker}">` +
+    `전체 차트<span class="go" aria-hidden="true">↗</span></a>`;
+  box.appendChild(legend);
+  return box;
+}
+
+/* 표의 한 줄을 눌렀을 때 차트를 펼치거나 접는다 */
+function attachChart(tr, ticker, row) {
+  if (!CHARTS[ticker]) return;
+  tr.classList.add("has-chart");
+  tr.tabIndex = 0;
+  tr.setAttribute("aria-expanded", "false");
+  const toggle = () => {
+    const open = tr.classList.toggle("open");
+    tr.setAttribute("aria-expanded", String(open));
+    if (!open) { tr.nextSibling?.remove(); return; }
+    const chartRow = document.createElement("tr");
+    chartRow.className = "chart-row";
+    const td = document.createElement("td");
+    td.colSpan = tr.children.length;
+    td.appendChild(buildChart(ticker, row));
+    chartRow.appendChild(td);
+    tr.after(chartRow);
+  };
+  tr.onclick = toggle;
+  tr.onkeydown = (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
+  };
+}
+
+{
+  const notes = [];
+  (DATA.suppressed_strategies || []).forEach(s =>
+    notes.push(`<b>${s.label}</b> 전략은 오늘 작동하지 않았습니다 — ${s.reason}. ` +
+               `이 전략은 지지선 매수라 시장이 무너질 때 반복 손절이 나기 때문에 강세장에서만 신호를 냅니다.`));
+  if (DATA.illiquid_excluded)
+    notes.push(`거래대금이 작아 사실상 매매가 어려운 <b>${DATA.illiquid_excluded}종목</b>은 평가 전에 제외했습니다 (전체 ${DATA.universe_size}종목 중).`);
+  if (DATA.gap_excluded)
+    notes.push(`시초가가 +6% 이상 뛴 과열 상태여서 제외한 진입 신호 <b>${DATA.gap_excluded}건</b>.`);
+  document.getElementById("filterNote").innerHTML = notes.join("<br>");
+  if (topPicks.length === 0 && notes.length)
+    document.getElementById("topSection").style.display = "block";
+}
+
+if (topPicks.length > 0) {
+  document.getElementById("topSection").style.display = "block";
+  document.getElementById("topSub").textContent =
+    `점수 상위 ${topPicks.length}개 · 신호 종목 ${(DATA.scored || []).length}개 중 · 한 섹터가 독점하지 않도록 분산됨`;
+
+  document.getElementById("topGrid").innerHTML = topPicks.map((p, i) => {
+    const metrics = [
+      ["현재가", CUR + price(p.close)],
+      ["손절가", `${CUR}${price(p.stop_loss)} (-${num(p.risk_pct, 1)}%)`],
+      ["RS", p.rs === null ? "-" : `상위 ${num(100 - p.rs, 0)}%`],
+      ["손절폭", p.atr_stop_multiple === null ? "-" : `ATR ${num(p.atr_stop_multiple, 2)}배`],
+      // 손익비는 좋고 나쁨이 아니라 성향이다. 높으면 크게 먹지만 자주 틀리고,
+      // 낮으면 조금 먹지만 자주 맞는다 (설계 구간 3,980건에서 기대값은 거의 같았다).
+      ["손익비", rrText(p)],
+      ["거래대금 힘", p.money_power === null ? "-" : `${num(p.money_power, 2)}배`],
+      ["마감 강세", p.close_strength === null ? "-" : `${num(p.close_strength * 100, 0)}%`],
+      ["신고가 대비", p.near_high_pct === null ? "-" : `${num(p.near_high_pct, 1)}%`],
+      // BNF 역추세는 추세 건강도를 재지 않는다 (방금 무너진 걸 사는 전략이라 뜻이 안 맞음)
+      ["추세 건강도", p.trend_health === null || p.trend_health === undefined
+        ? "해당 없음" : `${num(p.trend_health, 0)}점`],
+    ].map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join("");
+
+    return `<div class="top-card reveal${i === 0 ? " rank1" : ""}" style="--d:${(i * 0.06).toFixed(2)}s">
+      <div class="top-rank">RANK ${i + 1}</div>
+      <div class="top-name">${p.name}</div>
+      <div class="top-code">${p.ticker}</div>
+      <div class="top-score"><b>${num(p.score, 1)}</b><span>SCORE</span></div>
+      ${p.sector ? `<div class="top-sector">${p.sector}</div>` : ""}
+      ${companyLine(p.ticker, true)}
+      <dl class="top-metrics">${metrics}</dl>
+      <div class="top-strat"><b>${(p.strategies || []).join(" · ")}</b><br>${p.detail || ""}</div>
+      ${(p.warnings || []).length ? `<div class="top-warn">${p.warnings.join("<br>")}</div>` : ""}
+    </div>`;
+  }).join("");
+
+}
+
+/* ---------- 👀 팔로우 중 ----------
+   우리 전략은 '상태'가 아니라 '순간'을 잡아서, 어제 뜬 종목이 오늘 리포트에는 없다.
+   그래서 따로 찍어둔 종목만 여기서 계속 추적한다. (watch.py로 편입/편출) */
+{
+  const follows = DATA.watchlist || [];
+  if (follows.length) {
+    document.getElementById("followSection").style.display = "block";
+    const broken = follows.filter(f => (f.warnings || []).length).length;
+    document.getElementById("followSub").textContent =
+      `${follows.length}종목` + (broken ? ` · ⚠ ${broken}종목 확인 필요` : "");
+
+    document.getElementById("followBody").innerHTML = follows.map(f => {
+      const cls = (v) => v > 0 ? "gain" : (v < 0 ? "loss" : "");
+      if (f.close === undefined) {
+        return `<tr><td><span class="ticker-name">${f.name}</span><br>
+          <span class="ticker-code">${f.ticker}</span></td>
+          <td colspan="7" class="rationale">${(f.warnings || []).join(" ")}</td></tr>`;
+      }
+      return `<tr class="${(f.warnings || []).length ? "broke-stop" : ""}">
+        <td><span class="ticker-name">${f.name}</span><br><span class="ticker-code">${f.ticker}</span></td>
+        <td class="mono">${f.added}</td>
+        <td class="mono">${f.held_days}일</td>
+        <td class="mono">${CUR}${price(f.entry_price)}</td>
+        <td class="px mono">${CUR}${price(f.close)}</td>
+        <td class="mono ${cls(f.change_pct)}">${f.change_pct > 0 ? "+" : ""}${num(f.change_pct, 1)}%</td>
+        <td class="mono ${cls(f.from_peak_pct)}">${num(f.from_peak_pct, 1)}%</td>
+        <td class="rationale">${(f.warnings || []).join("<br>")
+          || (f.strategy ? `${f.strategy} 신호로 편입` : "")}
+          ${f.stop ? `<br><span class="ticker-code">편입 당시 손절 ${CUR}${price(f.stop)}</span>` : ""}</td>
+      </tr>`;
+    }).join("");
+  }
+}
+
+const spWatch = DATA.sp500_watch || [];
+const spWatchTab = { id: "spwatch", desc: "S&P500 시총 요건(약 $22.7B)을 충족하지만 아직 미편입인 종목 — 편입 발표 시 패시브 자금의 의무 매수가 발생하므로 사전 후보 풀로 활용. 단, 시총은 여러 요건 중 하나일 뿐이며 최종 선정은 위원회 재량", bio: "", explanation: "", count: spWatch.length, isSpWatch: true, shortLabel: "🎯 편입 후보" };
+
+/* 전략은 셋뿐이고, 성격에 따라 두 줄로 나눈다.
+   돌파·눌림목은 추세를 따라가고, BNF는 추세를 거스른다. 판단 기준이 반대라
+   같은 줄에 두면 헷갈린다 (추세 건강도 점수도 앞의 둘에만 붙는다). */
+const strategyTabs = DATA.strategies.map(s => ({ ...s, count: s.results.length }));
+const trendTabs = strategyTabs.filter(s => s.id !== "bnf");
+const counterTabs = strategyTabs.filter(s => s.id === "bnf");
+
+/* 편입 워치는 미국장 전용 — 한국장에서는 탭 자체를 만들지 않는다 */
+const hasSpWatch = Array.isArray(DATA.sp500_watch);
+const allTabs = [...trendTabs, ...counterTabs, ...(hasSpWatch ? [spWatchTab] : [])];
+if (hasSpWatch) document.getElementById("spWatchSection").style.display = "block";
+
+/* 첫 화면은 신호가 가장 많은 '전략' 탭으로 — 빈 탭이 열려 있으면 매번 눌러서 찾아야 한다.
+   편입 워치는 부가 기능이라 후보에서 뺀다 (신호 수만 보면 29건이라 항상 이게 뽑힌다). */
+let activeId = (strategyTabs.slice().sort((a, b) => b.count - a.count)[0]
+                || allTabs[0] || {}).id;
+
+const tabsSpWatchEl = document.getElementById("tabsSpWatch");
+const tabsTrendEl = document.getElementById("tabsTrend");
+const tabsCounterEl = document.getElementById("tabsCounter");
+const infoCard = document.getElementById("infoCard");
+const infoBio = document.getElementById("infoBio");
+const infoExplain = document.getElementById("infoExplain");
+const theadEl = document.getElementById("thead");
+const tbody = document.getElementById("tbody");
+const emptyEl = document.getElementById("empty");
+
+function makeTab(t) {
+  const btn = document.createElement("button");
+  const label = t.label || t.shortLabel;
+  btn.type = "button";
+  // BNF는 성격이 반대라 활성화 색도 다르게 (손익 파랑 = 떨어진 걸 산다는 뜻)
+  btn.className = "panel-btn" + (t.id === activeId ? " active" : "") + (t.id === "bnf" ? " counter" : "");
+  btn.setAttribute("aria-pressed", String(t.id === activeId));
+  btn.innerHTML = `${label}<span class="n">${t.count}</span>`;
+  btn.onclick = () => { activeId = t.id; render(); };
+  return btn;
+}
+
+function render() {
+  if (hasSpWatch) { tabsSpWatchEl.innerHTML = ""; tabsSpWatchEl.appendChild(makeTab(spWatchTab)); }
+  tabsTrendEl.innerHTML = ""; trendTabs.forEach(t => tabsTrendEl.appendChild(makeTab(t)));
+  tabsCounterEl.innerHTML = ""; counterTabs.forEach(t => tabsCounterEl.appendChild(makeTab(t)));
+
+  const current = allTabs.find(t => t.id === activeId);
+
+  if (!current || !current.bio) {
+    infoCard.style.display = "none";
+  } else {
+    infoCard.style.display = "block";
+    infoBio.innerHTML = `<b>${current.label}</b> — ${current.bio}`;
+    infoExplain.textContent = current.explanation || current.desc;
+  }
+
+  tbody.innerHTML = "";
+
+  if (current.isSpWatch) {
+    theadEl.innerHTML = `<tr><th>종목</th><th>시가총액</th><th>요건 초과율</th><th style="text-align:left;">참고</th></tr>`;
+    if (spWatch.length === 0) {
+      emptyEl.style.display = "block";
+      emptyEl.textContent = "현재 시총 요건을 충족하는 미편입 종목이 없어요.";
+      return;
+    }
+    emptyEl.style.display = "none";
+    spWatch.forEach(c => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td><span class="ticker-name">${c.name}</span><br><span class="ticker-code">${c.ticker}</span></td>
+        <td class="px mono">$${c.market_cap_b}B</td>
+        <td class="volx-plain mono" style="color:var(--accent);font-weight:700;">+${c.exceeds_requirement_pct}%</td>
+        <td class="rationale">${c.note || ""}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+    return;
+  }
+
+  // 추세 건강도는 돌파·눌림목에만 있다. BNF는 그 칸을 아예 만들지 않는다 —
+  // 빈 칸을 두면 "왜 여긴 없지?"를 매번 다시 생각하게 된다.
+  const hasTrend = current.results.some(r => r.trend_health !== undefined && r.trend_health !== null);
+
+  theadEl.innerHTML = `<tr><th>종목</th><th>현재가</th><th>손절가</th>` +
+    (hasTrend ? `<th>추세 건강도</th>` : `<th>거래량</th>`) +
+    `<th style="text-align:left;">근거</th></tr>`;
+
+  if (!current || current.results.length === 0) {
+    emptyEl.style.display = "block";
+    emptyEl.textContent = "오늘 이 전략 조건을 만족한 종목이 없어요.";
+    return;
+  }
+  emptyEl.style.display = "none";
+
+  // 추세 건강도가 있으면 그 순서로, 없으면(BNF) 거래량 순으로 — 각 전략이 중요하게
+  // 보는 값이 다르므로 정렬 기준도 다르다.
+  const sorted = current.results.slice().sort((a, b) => hasTrend
+    ? (b.trend_health || 0) - (a.trend_health || 0)
+    : (b.volume_ratio || 0) - (a.volume_ratio || 0));
+
+  sorted.forEach(r => {
+    const tr = document.createElement("tr");
+    const volTxt = r.volume_ratio ? `${r.volume_ratio}x` : "-";
+    const midCell = hasTrend
+      ? `<td><span class="health mono" style="--h:${Math.round(r.trend_health || 0)}%">${num(r.trend_health, 0)}</span></td>`
+      : `<td><span class="volx">${volTxt}</span></td>`;
+    tr.innerHTML = `
+      <td><span class="ticker-name">${r.name}</span><br><span class="ticker-code">${r.ticker}</span>
+          ${companyLine(r.ticker)}</td>
+      <td class="px mono">${CUR}${price(r.close)}</td>
+      <td class="stop mono">${CUR}${price(r.stop_loss)}</td>
+      ${midCell}
+      <td class="rationale">${r.detail || ""}
+          <br><span class="ticker-code">손익비 ${rrText(r, true)}</span>
+          ${r.exit_rule ? `<br><span class="ticker-code">${r.exit_rule}</span>` : ""}</td>
+    `;
+    attachChart(tr, r.ticker, r);
+    tbody.appendChild(tr);
+  });
+}
+
+render();
+
+/* ---------- 등장 연출 ----------
+   화면에 들어오는 순간 한 번만 켠다. 스크롤 이벤트를 쓰면 스크롤할 때마다
+   계산이 돌아서 폰에서 버벅인다 — IntersectionObserver는 브라우저가 알아서 처리한다. */
+if (matchMedia("(prefers-reduced-motion: no-preference)").matches && "IntersectionObserver" in window) {
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      e.target.classList.add("shown");
+      io.unobserve(e.target);   // 한 번 나타난 건 다시 감시하지 않는다
+    }
+  }, {rootMargin: "0px 0px -8% 0px"});
+  const watch = () => document.querySelectorAll(".reveal:not(.shown)").forEach(el => io.observe(el));
+  watch();
+  // TOP 카드는 render() 이후에 만들어지므로 다시 한 번 훑는다
+  requestAnimationFrame(watch);
+
+  // 안전장치 — 어떤 이유로든 관찰이 동작하지 않으면 내용이 영영 안 보인다.
+  // 연출보다 "보이는 것"이 우선이므로 2초 뒤엔 무조건 다 켠다.
+  setTimeout(() => document.querySelectorAll(".reveal").forEach(el => el.classList.add("shown")), 2000);
+} else {
+  document.querySelectorAll(".reveal").forEach(el => el.classList.add("shown"));
+}
+</script>
+</body>
+</html>
