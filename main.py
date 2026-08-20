@@ -134,10 +134,19 @@ class DeleteItem(BaseModel):
     id: str
 
 
+class CashItem(BaseModel):
+    """현금 잔고. 보낸 통화만 바뀌고 나머지는 그대로 둔다."""
+    owner: str
+    krw: float | None = None
+    usd: float | None = None
+
+
 # ─── 포트폴리오 CRUD ─────────────────────────────────────
 @app.post("/api/update")
 def update_portfolio(item: EditItem):
     my_port = load_portfolio(force=True)
+    if item.id == CASH_KEY:
+        return {"error": "현금은 /api/cash 로 고칩니다."}
     if item.id not in my_port:
         return {"error": "종목을 찾을 수 없습니다."}
 
@@ -174,9 +183,28 @@ def add_portfolio(item: AddItem):
     return {"status": "success"}
 
 
+@app.post("/api/cash")
+def set_cash(item: CashItem):
+    """현금 잔고를 정한다. 종목과 같은 시트에 CASH_KEY 아래로 들어간다."""
+    raw = load_portfolio(force=True)
+    book = dict(raw.get(CASH_KEY) or {})
+    entry = dict(book.get(item.owner) or {})
+    for field in ("krw", "usd"):
+        value = getattr(item, field)
+        if value is not None:
+            entry[field] = value
+    book[item.owner] = entry
+    raw[CASH_KEY] = book
+    save_portfolio(raw)
+    set_cache(None)
+    return {"status": "success"}
+
+
 @app.post("/api/delete")
 def delete_portfolio(item: DeleteItem):
     my_port = load_portfolio(force=True)
+    if item.id == CASH_KEY:
+        return {"error": "현금은 지울 수 없습니다. 0으로 바꾸세요."}
     if item.id in my_port:
         del my_port[item.id]
         save_portfolio(my_port)
@@ -303,8 +331,22 @@ def fetch_one_us_stock(ticker):
     return ticker, None
 
 # ─── 시세 조합 ───────────────────────────────────────────
+# 현금은 종목이 아니라서 같은 목록에 섞으면 시세를 조회하려 든다.
+# 시트 하나만 쓰되 이 열쇠 아래에 따로 담는다.
+#   {"__cash__": {"조대표": {"krw": 1000000, "usd": 500}, ...}}
+CASH_KEY = "__cash__"
+
+
+def split_portfolio(raw: dict) -> tuple[dict, dict]:
+    """장부에서 종목과 현금을 갈라낸다."""
+    holdings = {k: v for k, v in raw.items() if k != CASH_KEY}
+    cash = raw.get(CASH_KEY) or {}
+    return holdings, cash
+
+
 def build_market_data():
-    my_port = load_portfolio()
+    raw_port = load_portfolio()
+    my_port, cash_book = split_portfolio(raw_port)
     kr_tickers = list(set(v["code"] for v in my_port.values() if v["code"].isdigit()))
     us_tickers = list(set(v["code"] for v in my_port.values() if not v["code"].isdigit()))
 
@@ -368,7 +410,29 @@ def build_market_data():
             "my_return":       f"{my_return:.2f}",
         })
 
+    # 현금은 원화로 환산해서 같이 내려준다. 달러 현금은 환율이 있어야 하는데,
+    # 미국 주식이 하나도 없는 날은 환율을 안 받아왔으므로 그때만 따로 받는다.
+    cash = {}
+    for owner, amounts in cash_book.items():
+        krw = float(amounts.get("krw") or 0)
+        usd = float(amounts.get("usd") or 0)
+        rate = usd_krw
+        if usd and rate is None:
+            try:
+                rate = fetch_exchange_rate()
+                usd_krw = rate
+            except Exception as e:
+                warnings.append(f"환율을 못 받아 달러 현금을 원화로 못 바꿨습니다: {e}")
+                rate = None
+        cash[owner] = {
+            "krw": krw,
+            "usd": usd,
+            # 환율을 못 받으면 달러분을 0으로 치지 않는다 — 자산이 줄어 보이면 안 된다
+            "total_krw": None if (usd and rate is None) else krw + usd * (rate or 0),
+        }
+
     return {
+        "cash":      cash,
         "usd_krw":   f"{usd_krw:,.1f}" if usd_krw else "-",
         "kospi":     kospi_info,
         "kosdaq":    kosdaq_info,
@@ -585,12 +649,19 @@ td:hover .pen { opacity: .8; }
 <div id="panel-total" class="tab-panel active">
     <div class="grid">
         <div class="card">
-            <div class="card-label">패밀리 총 평가금액</div>
-            <div class="card-value" id="family-eval" style="color:#6366f1">-</div>
+            <div class="card-label">패밀리 총자산 (현금 포함)</div>
+            <div class="card-value" id="family-total" style="color:#6366f1">-</div>
+            <div class="card-sub"  id="family-split"></div>
         </div>
         <div class="card">
-            <div class="card-label">패밀리 통합 수익률</div>
+            <div class="card-label">주식 평가금액</div>
+            <div class="card-value" id="family-eval">-</div>
+            <div class="card-sub">현금 제외</div>
+        </div>
+        <div class="card">
+            <div class="card-label">주식 수익률</div>
             <div class="card-value" id="family-ret">-</div>
+            <div class="card-sub">현금은 손익이 없어 제외</div>
         </div>
         <div class="card">
             <div class="card-label">실시간 환율 (USD/KRW)</div>
@@ -619,6 +690,9 @@ td:hover .pen { opacity: .8; }
             <div class="card-sub"  id="wife-total-ret"></div>
         </div>
     </div>
+
+    <div class="section-title">💵 현금</div>
+    <div class="grid" id="cash-cards"></div>
 </div>
 
 <!-- 조대표 탭 -->
@@ -670,6 +744,9 @@ const fmtQty = n => Number.isInteger(n)
     ? n.toLocaleString()
     : n.toLocaleString(undefined, {maximumFractionDigits: 6});
 const sign = n => n > 0 ? '+' : '';
+/* 손익 금액은 절댓값으로 찍기 때문에 부호를 직접 붙여야 한다.
+   안 붙이면 3,310,128원 손실이 이익처럼 보인다. */
+const money = n => (n > 0 ? '+' : (n < 0 ? '-' : '')) + fmt(Math.abs(n)) + '원';
 const cls  = n => n > 0 ? 'up' : (n < 0 ? 'down' : '');
 
 function updateDashboard() {
@@ -722,11 +799,13 @@ function updateDashboard() {
         G.forEach(s => { fb += s.buy_amount_raw; fe += s.eval_amount_raw; });
         const fr = fb > 0 ? (fe - fb) / fb * 100 : 0;
         const fProfit = fe - fb;
-        
+
         document.getElementById('family-eval').innerText = fmt(fe) + '원';
         const frEl = document.getElementById('family-ret');
-        frEl.innerText   = sign(fr) + fr.toFixed(2) + '% (' + sign(fProfit) + fmt(Math.abs(fProfit)) + '원)';
+        frEl.innerText   = sign(fr) + fr.toFixed(2) + '% (' + money(fProfit) + ')';
         frEl.className   = 'card-value ' + cls(fr);
+
+        renderCash(data.cash || {}, fe);
     });
 }
 
@@ -756,14 +835,14 @@ function renderOwner(owner, prefix) {
     const krProfit = kre - krb;
     setText(prefix + '-kr-buy', fmt(krb) + '원');
     setText(prefix + '-kr-eval', fmt(kre) + '원');
-    setText(prefix + '-kr-profit', sign(krProfit) + fmt(Math.abs(krProfit)) + '원', cls(krProfit));
+    setText(prefix + '-kr-profit', money(krProfit), cls(krProfit));
     setText(prefix + '-kr-ret', sign(krRet) + krRet.toFixed(2) + '%', cls(krRet));
 
     const usRet = usb > 0 ? (use_ - usb) / usb * 100 : 0;
     const usProfit = use_ - usb;
     setText(prefix + '-us-buy', fmt(usb) + '원');
     setText(prefix + '-us-eval', fmt(use_) + '원');
-    setText(prefix + '-us-profit', sign(usProfit) + fmt(Math.abs(usProfit)) + '원', cls(usProfit));
+    setText(prefix + '-us-profit', money(usProfit), cls(usProfit));
     setText(prefix + '-us-ret', sign(usRet) + usRet.toFixed(2) + '%', cls(usRet));
 }
 
@@ -801,7 +880,7 @@ function makeRow(s, groupEval) {
         <td data-label="현재가"><strong>${s.current_price}</strong></td>
         <td data-label="매입총액" style="font-weight:600;color:var(--muted)">${fmt(s.buy_amount_raw)}원</td>
         <td data-label="평가금액" style="font-weight:700">${fmt(s.eval_amount_raw)}원</td>
-        <td data-label="평가손익" class="${cls(profit)}" style="font-weight:700">${sign(profit)}${fmt(Math.abs(profit))}원</td>
+        <td data-label="평가손익" class="${cls(profit)}" style="font-weight:700">${money(profit)}</td>
         <td data-label="오늘등락" class="${cls(td)}">${sign(td)}${s.today_change}%</td>
         <td data-label="수익률" class="${cls(mr)}" style="font-size:14px"><strong>${sign(mr)}${s.my_return}%</strong></td>
         <td data-label="관리">
@@ -815,10 +894,57 @@ function makeRow(s, groupEval) {
 document.addEventListener('click', (ev) => {
     const pen = ev.target.closest('.pen');
     if (!pen) return;
+    if (pen.dataset.cash) {           // 현금 연필
+        editCash(pen.dataset.owner, pen.dataset.cash, pen.dataset.value);
+        return;
+    }
     const tr = pen.closest('tr');
     if (!tr) return;
     editField(tr.dataset.id, pen.dataset.edit, pen.dataset.label, pen.dataset.value);
 });
+
+/* 현금 — 주식과 달리 손익이 없다. 그래서 총자산에는 더하되 수익률 계산에서는 뺀다.
+   현금을 수익률에 넣으면 현금을 많이 들고 있을수록 수익률이 0에 가까워져 뜻이 흐려진다. */
+function renderCash(cash, stockEval) {
+    const owners = ['조대표', '공쥬님'];
+    let totalCashKrw = 0, unknown = false;
+
+    document.getElementById('cash-cards').innerHTML = owners.map(o => {
+        const c = cash[o] || {krw: 0, usd: 0, total_krw: 0};
+        if (c.total_krw === null) unknown = true; else totalCashKrw += c.total_krw;
+        const face = o === '조대표' ? '👨‍💼' : '👸';
+        return `<div class="card">
+            <div class="card-label">${face} ${o} 현금</div>
+            <div class="card-value">${c.total_krw === null ? '환율 미확인' : fmt(c.total_krw) + '원'}</div>
+            <div class="card-sub">
+                원화 ${fmt(c.krw)}원
+                <button class="pen" data-cash="krw" data-owner="${o}" data-value="${c.krw}" title="원화 현금 수정">✏️</button>
+                · 달러 $${c.usd.toLocaleString(undefined,{maximumFractionDigits:2})}
+                <button class="pen" data-cash="usd" data-owner="${o}" data-value="${c.usd}" title="달러 현금 수정">✏️</button>
+            </div>
+        </div>`;
+    }).join('');
+
+    const total = stockEval + totalCashKrw;
+    document.getElementById('family-total').innerText = fmt(total) + '원' + (unknown ? ' +α' : '');
+    document.getElementById('family-split').innerText =
+        `주식 ${fmt(stockEval)}원 · 현금 ${fmt(totalCashKrw)}원`;
+}
+
+function editCash(owner, cur, current) {
+    const label = cur === 'krw' ? '원화 현금' : '달러 현금';
+    const v = prompt(`${owner} ${label} 입력:`, current);
+    if (v === null) return;
+    const num = parseFloat(String(v).replace(/[,원$\\s]/g, ''));
+    if (isNaN(num)) return alert('숫자만 입력해주세요.');
+    fetch('/api/cash', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({owner, [cur]: num})
+    }).then(r=>r.json()).then(r=>{
+        if (r.error) return alert(r.error);
+        updateDashboard();
+    }).catch(e => alert('저장 실패: ' + e));
+}
 
 function esc(t) {
     return String(t).replace(/[&<>"]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));
